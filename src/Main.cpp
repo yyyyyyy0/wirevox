@@ -1,6 +1,7 @@
 #include "CommandLine.h"
 #include "MainComponent.h"
 #include "Product.h"
+#include "Settings.h"
 #include "Theme.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
