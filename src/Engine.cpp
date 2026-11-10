@@ -133,9 +133,9 @@ int Engine::setBufferSize (int frames)
     return openWithSetup (setup);
 }
 
-int Engine::openWithSetup (const AudioDeviceManager::AudioDeviceSetup& setup)
+int Engine::openWithSetup (const AudioDeviceManager::AudioDeviceSetup& setup, bool recordAsChosen)
 {
-    const auto failed = deviceManager.setAudioDeviceSetup (setup, false).isNotEmpty();
+    const auto failed = deviceManager.setAudioDeviceSetup (setup, recordAsChosen).isNotEmpty();
     refreshHal();
 
     auto* device = deviceManager.getCurrentAudioDevice();

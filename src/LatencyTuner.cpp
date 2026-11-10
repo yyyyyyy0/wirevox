@@ -284,7 +284,7 @@ void LatencyTuner::finish (const String& reason, Outcome outcome)
         auto setup = originalSetup;
         setup.bufferSize = sizes[lastCleanIndex];
 
-        if (engine.openWithSetup (setup) != 0)
+        if (engine.openWithSetup (setup, true) != 0)
         {
             engine.setExperiments (lastCleanUsageIndex >= 0 ? Experiments { usages[lastCleanUsageIndex] } : Experiments {});
         }

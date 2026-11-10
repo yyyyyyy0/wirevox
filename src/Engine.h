@@ -84,7 +84,8 @@ public:
 
     // The same for a whole setup, which also reopens a device that a failed step left closed (JUCE
     // forgets the device names then, so the caller has to keep the setup it wants back).
-    int openWithSetup (const AudioDeviceManager::AudioDeviceSetup&);
+    // `recordAsChosen` also makes it the setup JUCE reopens with after a device list change.
+    int openWithSetup (const AudioDeviceManager::AudioDeviceSetup&, bool recordAsChosen = false);
 
     //==============================================================================
     // What the settings file should hold for the audio side: the chosen device setup with the buffer
