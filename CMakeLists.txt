@@ -61,6 +61,7 @@ target_sources(MicFxHost PRIVATE
     src/Measure.cpp
     src/SelfTests.cpp
     src/MeasureCommand.cpp
+    src/BreakdownPanel.cpp
     src/MainComponent.cpp
     src/Theme.cpp
     src/ThemeRegistry.cpp

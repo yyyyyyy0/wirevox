@@ -8,6 +8,9 @@ namespace mfx
 namespace
 {
     constexpr int minNameWidth = 150;
+    constexpr int minChainListHeight = 130;
+    constexpr int minBreakdownHeight = 110;
+    constexpr int measureRuns = 6;
     constexpr int timerMs = 250;
     constexpr int ticksPerSave = 120;
 
@@ -261,6 +264,9 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     chainList.setModel (listModel.get());
     addAndMakeVisible (chainList);
 
+    breakdown.onMeasure = [this] { askToMeasure(); };
+    addAndMakeVisible (breakdown);
+
     addButton.onClick = [this] { chooseFiles(); };
     addAndMakeVisible (addButton);
 
@@ -314,6 +320,7 @@ MainComponent::~MainComponent()
 
     // A run that is cut short puts the original buffer and cycle usage back before anything is written.
     tuner.cancel();
+    measureSession.reset();
     persist();
     closeAllEditors();
     deviceManager.removeChangeListener (this);
@@ -330,6 +337,9 @@ void MainComponent::paint (Graphics& g)
     theme->paintLogo (g, logoStrip, productName, "VOICE EFFECT RACK");
     theme->paintPanel (g, deviceTitle, deviceFrame, "AUDIO I/O", ui::PanelKind::controls);
     theme->paintPanel (g, chainTitle, chainFrame, "EFFECT CHAIN", ui::PanelKind::list);
+
+    if (! breakdownFrame.isEmpty())
+        theme->paintPanel (g, breakdownTitle, breakdownFrame, "LATENCY BREAKDOWN", ui::PanelKind::list);
 }
 
 void MainComponent::resized()
@@ -373,6 +383,19 @@ void MainComponent::resized()
     dropHint.setBounds (top.withTrimmedLeft (10));
     area.removeFromTop (8);
 
+    // The breakdown sits under the chain. It takes the height its rows need, but the chain keeps room
+    // for a few rows; when there is less than that the breakdown scrolls.
+    const auto breakdownWanted = m.panelTitleHeight + 4 + breakdown.getPreferredHeight (area.getWidth()) + 8;
+    const auto breakdownRoom = jmax (m.panelTitleHeight + 4 + minBreakdownHeight, area.getHeight() - minChainListHeight - 10);
+    const auto breakdownHeight = jmin (breakdownWanted, breakdownRoom);
+
+    auto breakdownArea = area.removeFromBottom (breakdownHeight);
+    area.removeFromBottom (10);
+    breakdownTitle = breakdownArea.removeFromTop (m.panelTitleHeight);
+    breakdownArea.removeFromTop (4);
+    breakdownFrame = breakdownArea;
+    breakdown.setBounds (breakdownArea.reduced (4));
+
     chainFrame = area;
     chainList.setBounds (area.reduced (4));
 
@@ -399,6 +422,8 @@ void MainComponent::lookAndFeelChanged()
         overlay->setVisible (theme->hasOverlay());
 
     lastLcdHeight = 0;
+    lastBreakdownHeight = 0;
+    breakdown.lookAndFeelChanged();
 
     resized();
     repaint();
@@ -415,7 +440,7 @@ void MainComponent::setTheme (const String& id)
 //==============================================================================
 bool MainComponent::isInterestedInFileDrag (const StringArray& files)
 {
-    if (tuner.isRunning())
+    if (isBusy())
         return false;
 
     for (auto& path : files)
@@ -479,10 +504,10 @@ void MainComponent::addPluginFiles (const Array<File>& files)
 
 void MainComponent::addDescription (const PluginDescription& description)
 {
-    // A file chooser or menu that was already open can still deliver a plugin while MIN LATENCY runs.
-    if (tuner.isRunning())
+    // A file chooser or menu that was already open can still deliver a plugin while MIN LATENCY or a measurement runs.
+    if (isBusy())
     {
-        showStatus (ja ("MIN LATENCY の実行中はプラグインを追加できません"));
+        showStatus (tuner.isRunning() ? ja ("MIN LATENCY の実行中はプラグインを追加できません") : ja ("計測の実行中はプラグインを追加できません"));
         return;
     }
 
@@ -572,7 +597,8 @@ void MainComponent::showStatus (const String& text)
 
 void MainComponent::refreshStatus()
 {
-    const auto progress = tuner.getProgress();
+    const auto progress = tuner.getProgress().isNotEmpty() ? tuner.getProgress()
+                        : measureSession != nullptr ? measureSession->getProgress() : String();
     status.setText (progress.isNotEmpty() ? progress : statusMessage.isNotEmpty() ? statusMessage : standingWarning);
 }
 
@@ -585,33 +611,127 @@ void MainComponent::startTuning()
         return;
     }
 
+    if (measureSession != nullptr)
+        return;
+
     showStatus ({});
     tuner.start();
 
     if (tuner.isRunning())
-        tuningStateChanged();
+        updateBusyState();
     else
         tuningEnded();
 }
 
-// The run changes the device underneath the window, so what it measured is only valid for the setup
-// it started with: the device selector and everything that edits the chain are off until it ends.
-void MainComponent::tuningStateChanged()
+// MIN LATENCY and the measurement of the output device each change the device or the signal path
+// underneath the window, so what they find is only valid for the setup they started with: the device
+// selector and everything that edits the chain are off until the run ends, and the two never overlap.
+void MainComponent::updateBusyState()
 {
     const auto tuning = tuner.isRunning();
+    const auto measuring = measureSession != nullptr;
+    const auto busy = tuning || measuring;
 
     minLatencyButton.setButtonText (tuning ? ja ("中止") : "MIN LATENCY");
-    deviceSelector.setEnabled (! tuning);
-    addButton.setEnabled (! tuning);
-    chainList.setEnabled (! tuning);
+    minLatencyButton.setEnabled (! measuring);
+    deviceSelector.setEnabled (! busy);
+    addButton.setEnabled (! busy);
+    chainList.setEnabled (! busy);
+    breakdown.setMeasuring (measuring, ! tuning && deviceManager.getCurrentAudioDevice() != nullptr);
     refreshStatus();
 }
 
 void MainComponent::tuningEnded()
 {
-    tuningStateChanged();
+    updateBusyState();
     showStatus (tuner.getResult());
     persist();
+}
+
+//==============================================================================
+void MainComponent::askToMeasure()
+{
+    if (measureSession != nullptr)
+    {
+        measureSession->cancel();
+        measuringEnded();
+        return;
+    }
+
+    if (isBusy() || deviceManager.getCurrentAudioDevice() == nullptr)
+        return;
+
+    // The test tone goes to the output device, which is what a call hears as the microphone.
+    const auto options = MessageBoxOptions()
+        .withIconType (MessageBoxIconType::WarningIcon)
+        .withTitle (ja ("仮想デバイスを計測します"))
+        .withMessage (ja ("計測の間（数秒）、出力デバイス「") + deviceManager.getAudioDeviceSetup().outputDeviceName
+                      + ja ("」に試験音が流れ、マイクの音は止まります。通話中は、通話の相手に試験音が聞こえます。\n\n計測を始めますか？"))
+        .withButton (ja ("計測する"), 1)
+        .withButton (ja ("やめる"), 0)
+        .withAssociatedComponent (this);
+
+    AlertWindow::showAsync (options, [safe = SafePointer<MainComponent> (this)] (int result)
+    {
+        if (safe != nullptr && result == 1)
+            safe->startMeasuring();
+    });
+}
+
+void MainComponent::startMeasuring()
+{
+    // The dialog can outlive a MIN LATENCY that was started behind it, or a device that was unplugged.
+    if (isBusy() || deviceManager.getCurrentAudioDevice() == nullptr)
+        return;
+
+    measure::Options options;
+    options.runs = measureRuns;
+
+    showStatus ({});
+    measureSession = std::make_unique<measure::Session> (engine, options);
+
+    if (! measureSession->start())
+    {
+        const auto problem = measureSession->getResult().problemJa;
+        measureSession.reset();
+        updateBusyState();
+        showStatus (ja ("仮想デバイスを計測できませんでした: ") + problem);
+        return;
+    }
+
+    updateBusyState();
+}
+
+void MainComponent::measuringEnded()
+{
+    String message;
+
+    if (measureSession != nullptr)
+    {
+        const auto& result = measureSession->getResult();
+        const auto record = measure::makeExcessRecord (result, deviceManager.getAudioDeviceSetup().outputDeviceName, Time::getCurrentTime(), 3);
+
+        if (result.problem.isNotEmpty())
+        {
+            message = ja ("仮想デバイスの計測: ") + result.problemJa + ja ("。元の状態に戻しました");
+        }
+        else if (record.has_value())
+        {
+            engine.setExcess (*record);
+            message = ja ("仮想デバイスが足している遅延: ") + String (record->excessMs, 2) + ja (" ms（") + String (record->runs) + ja (" 回の中央値）");
+        }
+        else
+        {
+            message = ja ("試験音を安定して検出できなかったため、結果を採用しませんでした（信頼できた回数 ")
+                    + String (result.trustworthyRuns) + "/" + String ((int) result.runs.size()) + ja ("）");
+        }
+    }
+
+    measureSession.reset();
+    updateBusyState();
+    showStatus (message);
+    persist();
+    updateReadout();
 }
 
 void MainComponent::persist()
@@ -681,6 +801,7 @@ void MainComponent::updateReadout()
                  << (chain[i].bypassed ? ja (" (バイパス中)") : String()) << "\n";
 
     lcd.setContent ({ "TOTAL LATENCY", bigValue, "ms", text.trimEnd() });
+    updateBreakdown();
     refreshStatus();
 
     const auto preferred = lcd.getPreferredHeight (lcd.getWidth());
@@ -692,10 +813,92 @@ void MainComponent::updateReadout()
     }
 }
 
+void MainComponent::updateBreakdown()
+{
+    ui::BreakdownView view;
+    auto* device = deviceManager.getCurrentAudioDevice();
+    view.deviceOpen = device != nullptr;
+
+    if (device != nullptr)
+    {
+        const auto rate = device->getCurrentSampleRate();
+        const auto buffer = device->getCurrentBufferSizeSamples();
+        view.sampleRate = rate;
+        view.cycleUsage = engine.getCycleUsage();
+        view.bufferMs = samplesToMs (buffer, rate);
+        view.excess = engine.getExcess();
+
+        BreakdownInput input;
+        input.sampleRate = rate;
+        input.aggregate = engine.getAggregateNumbers();
+        input.cycleUsage = view.cycleUsage;
+
+        if (engine.getAggregate() == kAudioObjectUnknown)
+            input.aggregate.bufferSize = buffer;
+
+        if (view.excess.has_value())
+            input.excessMs = view.excess->excessMs;
+
+        // The time a plugin takes is a share of what one buffer lasts.
+        const auto blockSize = engine.callback.getBlockSize() > 0 ? engine.callback.getBlockSize() : buffer;
+        const auto periodNs = rate > 0.0 ? 1.0e9 * blockSize / rate : 0.0;
+        std::vector<ProcessStats> stats;
+
+        for (int i = 0; i < chain.size(); ++i)
+        {
+            if (! chain[i].isLive())
+                continue;
+
+            const auto bypassed = chain[i].bypassed;
+            input.plugins.push_back ({ i, chain[i].description.name, bypassed ? 0 : chain[i].node->getProcessor()->getLatencySamples(), bypassed });
+
+            ui::SlotLoadView load;
+            load.slot = i;
+            load.name = chain[i].description.name;
+            load.bypassed = bypassed;
+            load.stats = bypassed ? ProcessStats {} : chain[i].load.stats (periodNs);
+            view.loads.push_back (std::move (load));
+            stats.push_back (view.loads.back().stats);
+        }
+
+        if (const auto heaviest = findHeaviest (stats); heaviest >= 0)
+            view.loads[(size_t) heaviest].heaviest = true;
+
+        view.latency = computeBreakdown (input);
+    }
+
+    breakdown.setView (view);
+    breakdown.setMeasuring (measureSession != nullptr, ! tuner.isRunning() && view.deviceOpen);
+
+    // The panel grows and shrinks with the chain; the layout makes room for it.
+    const auto preferred = breakdown.getPreferredHeight (breakdown.getWidth());
+
+    if (preferred != lastBreakdownHeight)
+    {
+        lastBreakdownHeight = preferred;
+        resized();
+    }
+}
+
 void MainComponent::timerCallback()
 {
     if (tuner.isRunning() && tuner.tick())
         tuningEnded();
+
+    if (measureSession != nullptr && measureSession->tick())
+        measuringEnded();
+
+    // What the audio thread timed since the last tick. A new device start (another buffer size or
+    // rate) changes what a share of a buffer means, so the old readings go.
+    if (const auto startCount = engine.callback.getStartCount(); startCount != seenStartCount)
+    {
+        seenStartCount = startCount;
+        chain.resetProcessTimes();
+    }
+    else
+    {
+        chain.pollProcessTimes();
+    }
 
     updateReadout();
 

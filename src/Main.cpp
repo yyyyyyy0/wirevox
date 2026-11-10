@@ -22,7 +22,9 @@ public:
         setContentOwned (new mfx::MainComponent (themes), true);
         setResizable (true, true);
         setResizeLimits (760, 520, 2400, 1600);
-        centreWithSize (1000, 720);
+        // Tall enough for the chain and the latency breakdown under it, but within the screen.
+        const auto height = jmin (900, (int) Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds.getHeight() - 40);
+        centreWithSize (1000, jmax (720, height));
         setVisible (true);
     }
 

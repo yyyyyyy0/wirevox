@@ -1,8 +1,10 @@
 #pragma once
 
+#include "BreakdownPanel.h"
 #include "Chain.h"
 #include "Engine.h"
 #include "LatencyTuner.h"
+#include "Measure.h"
 #include "Text.h"
 #include "Theme.h"
 
@@ -51,9 +53,14 @@ private:
     void showStatus (const String&);
     void refreshStatus();
     void updateReadout();
+    void updateBreakdown();
     void startTuning();
-    void tuningStateChanged();
     void tuningEnded();
+    void askToMeasure();
+    void startMeasuring();
+    void measuringEnded();
+    bool isBusy() const noexcept        { return tuner.isRunning() || measureSession != nullptr; }
+    void updateBusyState();
     void persist();
 
     void timerCallback() override;
@@ -67,6 +74,7 @@ private:
     AudioDeviceManager& deviceManager = engine.deviceManager;
     AudioPluginFormatManager& formatManager = engine.formats;
     LatencyTuner tuner { engine };
+    std::unique_ptr<measure::Session> measureSession;
 
     AudioDeviceSelectorComponent deviceSelector;
     Viewport deviceViewport;
@@ -75,17 +83,19 @@ private:
     Label dropHint { {}, ja (".vst3 をこのウィンドウにドロップしても追加できます") };
     std::unique_ptr<ChainListModel> listModel;
     ListBox chainList;
+    ui::BreakdownPanel breakdown;
     ui::ReadoutPanel lcd;
     ui::StatusStrip status;
     ComboBox themeSelector;
     std::unique_ptr<Overlay> overlay;
     TooltipWindow tooltips { this };
 
-    Rectangle<int> logoStrip, deviceTitle, deviceFrame, chainTitle, chainFrame;
+    Rectangle<int> logoStrip, deviceTitle, deviceFrame, chainTitle, chainFrame, breakdownTitle, breakdownFrame;
 
     // Narrow windows put a row's buttons on a second line instead of squeezing the plugin name.
     bool stackedRows = false;
-    int lastLcdHeight = 0;
+    int lastLcdHeight = 0, lastBreakdownHeight = 0;
+    uint32 seenStartCount = 0;
 
     std::unique_ptr<FileChooser> chooser;
     std::map<AudioProcessor*, std::unique_ptr<EditorWindow>> editors;
