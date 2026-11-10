@@ -183,9 +183,30 @@ MainComponent::MainComponent()
     auto* savedDevice = settings != nullptr ? settings->getChildByName ("DEVICESETUP") : nullptr;
     deviceManager.initialise (1, 2, savedDevice != nullptr ? savedDevice : &noDevice, false);
 
+    bool skippedChainAfterCrash = false;
+
     if (settings != nullptr)
+    {
         if (auto* chainXml = settings->getChildByName ("CHAIN"))
-            restoreProblems = chain.restore (*chainXml);
+        {
+            // A plugin that segfaults while loading takes the whole process down. The marker it
+            // leaves behind makes the next launch skip the chain instead of crashing again.
+            const auto marker = getSettingsFile().getSiblingFile ("restoring");
+
+            if (marker.existsAsFile())
+            {
+                getSettingsFile().copyFileTo (getSettingsFile().getSiblingFile ("settings.crashed.xml"));
+                skippedChainAfterCrash = true;
+            }
+            else
+            {
+                marker.create();
+                restoreProblems = chain.restore (*chainXml);
+            }
+
+            marker.deleteFile();
+        }
+    }
 
     player.setProcessor (&chain.getGraph());
     deviceManager.addAudioCallback (&player);
@@ -215,7 +236,9 @@ MainComponent::MainComponent()
     status.setColour (Label::textColourId, Colours::orange);
     addAndMakeVisible (status);
 
-    if (! restoreProblems.isEmpty())
+    if (skippedChainAfterCrash)
+        showStatus (ja ("前回は読み込み中に終了したため、チェーンを読み込んでいません（元の設定: settings.crashed.xml）"));
+    else if (! restoreProblems.isEmpty())
         showStatus (ja ("復元できなかったプラグイン: ") + restoreProblems.joinIntoString (" / "));
 
     setSize (1000, 720);
@@ -448,8 +471,8 @@ void MainComponent::updateReadout()
              << device->getActiveOutputChannels().countNumberOfSetBits() << " ch)\n"
              << "サンプルレート: " << String (sampleRate, 0) << " Hz\n"
              << "バッファサイズ: " << samplesAndMs (device->getCurrentBufferSizeSamples(), sampleRate) << "\n"
-             << "入力デバイス遅延: " << samplesAndMs (inLatency, sampleRate) << "\n"
-             << "出力デバイス遅延: " << samplesAndMs (outLatency, sampleRate) << "\n"
+             << "入力デバイス遅延（バッファ込み）: " << samplesAndMs (inLatency, sampleRate) << "\n"
+             << "出力デバイス遅延（バッファ込み）: " << samplesAndMs (outLatency, sampleRate) << "\n"
              << "プラグイン遅延合計: " << samplesAndMs (pluginLatency, sampleRate) << "\n"
              << "合計: " << samplesAndMs (inLatency + outLatency + pluginLatency, sampleRate) << "\n"
              << "xrun: " << (xruns >= 0 ? String (xruns) : ja ("非対応")) << "\n";

@@ -12,7 +12,14 @@ File getSettingsFile()
 
 std::unique_ptr<XmlElement> loadSettings()
 {
-    return XmlDocument::parse (getSettingsFile());
+    const auto file = getSettingsFile();
+    auto xml = XmlDocument::parse (file);
+
+    // The next save would replace an unparseable file with an empty chain and lose every plugin state.
+    if (xml == nullptr && file.existsAsFile())
+        file.copyFileTo (file.getSiblingFile ("settings.unreadable.xml"));
+
+    return xml;
 }
 
 bool saveSettings (const XmlElement& xml)
