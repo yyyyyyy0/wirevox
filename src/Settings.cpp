@@ -66,6 +66,16 @@ File getSettingsFile()
     return settingsFileOverride != File() ? settingsFileOverride : defaultSettingsFile (home());
 }
 
+String readThemeId (const XmlElement& root)
+{
+    return root.getStringAttribute ("theme");
+}
+
+void writeThemeId (XmlElement& root, const String& id)
+{
+    root.setAttribute ("theme", id);
+}
+
 std::unique_ptr<XmlElement> loadSettings()
 {
     const auto file = getSettingsFile();

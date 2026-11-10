@@ -1,6 +1,7 @@
 #include "CommandLine.h"
 #include "MainComponent.h"
 #include "Product.h"
+#include "Theme.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
@@ -11,13 +12,13 @@ using namespace juce;
 class MainWindow final : public DocumentWindow
 {
 public:
-    MainWindow()
+    explicit MainWindow (mfx::ui::ThemeRegistry& themes)
         : DocumentWindow (JUCEApplication::getInstance()->getApplicationName(),
                           Desktop::getInstance().getDefaultLookAndFeel().findColour (ResizableWindow::backgroundColourId),
                           DocumentWindow::allButtons)
     {
         setUsingNativeTitleBar (true);
-        setContentOwned (new mfx::MainComponent(), true);
+        setContentOwned (new mfx::MainComponent (themes), true);
         setResizable (true, true);
         setResizeLimits (760, 520, 2400, 1600);
         centreWithSize (1000, 720);
@@ -37,11 +38,22 @@ public:
     const String getApplicationVersion() override    { return JUCE_APPLICATION_VERSION_STRING; }
     bool moreThanOneInstanceAllowed() override       { return false; }
 
-    void initialise (const String&) override         { window = std::make_unique<MainWindow>(); }
-    void shutdown() override                         { window.reset(); }
+    void initialise (const String&) override
+    {
+        Desktop::getInstance().setDefaultLookAndFeel (&themes.get (mfx::ui::ThemeRegistry::getDefaultId()));
+        window = std::make_unique<MainWindow> (themes);
+    }
+
+    void shutdown() override
+    {
+        window.reset();
+        Desktop::getInstance().setDefaultLookAndFeel (nullptr);
+    }
+
     void systemRequestedQuit() override              { quit(); }
 
 private:
+    mfx::ui::ThemeRegistry themes;
     std::unique_ptr<MainWindow> window;
 };
 

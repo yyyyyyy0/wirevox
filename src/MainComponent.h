@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Chain.h"
+#include "Theme.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <map>
@@ -18,11 +19,12 @@ class MainComponent final : public Component,
                             private ChangeListener
 {
 public:
-    MainComponent();
+    explicit MainComponent (ui::ThemeRegistry&);
     ~MainComponent() override;
 
     void resized() override;
     void paint (Graphics&) override;
+    void lookAndFeelChanged() override;
 
     bool isInterestedInFileDrag (const StringArray& files) override;
     void filesDropped (const StringArray& files, int x, int y) override;
@@ -31,7 +33,7 @@ private:
     class ChainRow;
     class ChainListModel;
     class EditorWindow;
-    class Readout;
+    class Overlay;
 
     void chooseFiles();
     void addPluginFiles (const Array<File>&);
@@ -45,12 +47,16 @@ private:
     void setSlotBypassed (int index, bool);
     void chainEdited();
 
+    void setTheme (const String& id);
     void showStatus (const String&);
     void updateReadout();
     void persist();
 
     void timerCallback() override;
     void changeListenerCallback (ChangeBroadcaster*) override;
+
+    ui::ThemeRegistry& themes;
+    String themeId;
 
     AudioPluginFormatManager formatManager;
     Chain chain;
@@ -63,8 +69,16 @@ private:
     Label dropHint { {}, ja (".vst3 をこのウィンドウにドロップしても追加できます") };
     std::unique_ptr<ChainListModel> listModel;
     ListBox chainList;
-    std::unique_ptr<Readout> readout;
-    Label status;
+    ui::ReadoutPanel lcd;
+    ui::StatusStrip status;
+    ComboBox themeSelector;
+    std::unique_ptr<Overlay> overlay;
+
+    Rectangle<int> logoStrip, deviceTitle, deviceFrame, chainTitle, chainFrame;
+
+    // Narrow windows put a row's buttons on a second line instead of squeezing the plugin name.
+    bool stackedRows = false;
+    int lastLcdHeight = 0;
 
     std::unique_ptr<FileChooser> chooser;
     std::map<AudioProcessor*, std::unique_ptr<EditorWindow>> editors;

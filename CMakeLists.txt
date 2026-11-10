@@ -50,7 +50,10 @@ target_sources(MicFxHost PRIVATE
     src/Chain.cpp
     src/Settings.cpp
     src/CommandLine.cpp
-    src/MainComponent.cpp)
+    src/MainComponent.cpp
+    src/Theme.cpp
+    src/ThemeRegistry.cpp
+    src/Rack84Theme.cpp)
 
 target_compile_definitions(MicFxHost PRIVATE
     MFX_PRODUCT_NAME="${MFX_PRODUCT_NAME}"

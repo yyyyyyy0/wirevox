@@ -22,6 +22,10 @@ void migrateLegacySettingsIfNeeded();
 
 juce::File getSettingsFile();
 
+// Id of the selected theme; empty when the settings do not name one. Validation is the caller's job.
+juce::String readThemeId (const juce::XmlElement& root);
+void writeThemeId (juce::XmlElement& root, const juce::String& id);
+
 std::unique_ptr<juce::XmlElement> loadSettings();
 bool saveSettings (const juce::XmlElement&);
 

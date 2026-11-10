@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "Product.h"
 #include "Settings.h"
 
 namespace mfx
@@ -6,7 +7,7 @@ namespace mfx
 
 namespace
 {
-    constexpr int rowHeight = 38;
+    constexpr int minNameWidth = 150;
     constexpr int timerMs = 250;
     constexpr int ticksPerSave = 120;
 
@@ -39,36 +40,14 @@ public:
         owner.closeEditor (&processor);
     }
 
+    void lookAndFeelChanged() override
+    {
+        setBackgroundColour (findColour (ResizableWindow::backgroundColourId));
+    }
+
 private:
     MainComponent& owner;
     AudioProcessor& processor;
-};
-
-//==============================================================================
-// A Label sizes every line from the first font, so Japanese glyphs from the fallback font overlap.
-// AttributedString lays text out through CoreText, which accounts for the fallback font's height.
-class MainComponent::Readout final : public Component
-{
-public:
-    void setText (const String& newText)
-    {
-        if (newText == text)
-            return;
-
-        text = newText;
-        repaint();
-    }
-
-    void paint (Graphics& g) override
-    {
-        AttributedString attributed;
-        attributed.setLineSpacing (2.0f);
-        attributed.append (text, FontOptions (13.0f), Colours::white);
-        attributed.draw (g, getLocalBounds().toFloat());
-    }
-
-private:
-    String text;
 };
 
 //==============================================================================
@@ -78,7 +57,6 @@ public:
     explicit ChainRow (MainComponent& ownerIn)
         : owner (ownerIn)
     {
-        addAndMakeVisible (name);
         addAndMakeVisible (bypass);
         addAndMakeVisible (editor);
         addAndMakeVisible (up);
@@ -97,42 +75,99 @@ public:
         row = newRow;
         auto& slot = owner.chain[row];
 
-        auto text = String (row + 1) + ".  " + slot.description.name;
+        info.number = row + 1;
+        info.name = slot.description.name;
+        info.failureTag = slot.isLive() ? String() : ja ("[読み込み失敗]");
+        info.state = ! slot.isLive() ? ui::SlotState::failed : slot.bypassed ? ui::SlotState::bypassed : ui::SlotState::active;
 
-        if (! slot.isLive())
-            text << ja ("   [読み込み失敗]");
-
-        name.setText (text, dontSendNotification);
-        name.setColour (Label::textColourId, slot.isLive() ? Colours::white : Colours::salmon);
         bypass.setToggleState (slot.bypassed, dontSendNotification);
         editor.setEnabled (slot.isLive());
         up.setEnabled (row > 0);
         down.setEnabled (row < owner.chain.size() - 1);
+        repaint();
+    }
+
+    void paint (Graphics& g) override
+    {
+        if (auto* theme = ui::findTheme (*this))
+            theme->paintSlotRow (g, info, geometry);
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced (4, 5);
+        auto* theme = ui::findTheme (*this);
 
-        remove.setBounds (area.removeFromRight (56));
-        area.removeFromRight (4);
-        down.setBounds (area.removeFromRight (34));
-        area.removeFromRight (4);
-        up.setBounds (area.removeFromRight (34));
-        area.removeFromRight (4);
-        editor.setBounds (area.removeFromRight (70));
-        area.removeFromRight (6);
-        bypass.setBounds (area.removeFromRight (84));
-        name.setBounds (area);
+        if (theme == nullptr)
+            return;
+
+        const auto& m = theme->getMetrics();
+        geometry.module = getLocalBounds().reduced (4, 3);
+
+        auto inner = geometry.module.reduced (m.rowInsetX, 7);
+        auto top = owner.stackedRows ? inner.removeFromTop (m.controlHeight + 2) : inner;
+
+        geometry.number = top.removeFromLeft (m.numberWidth).withSizeKeepingCentre (m.numberWidth, m.controlHeight - 2);
+        top.removeFromLeft (8);
+        geometry.indicator = top.removeFromLeft (m.indicatorWidth).withSizeKeepingCentre (m.indicatorWidth, m.controlHeight - 2);
+        top.removeFromLeft (10);
+
+        Rectangle<int> buttons;
+
+        if (owner.stackedRows)
+        {
+            geometry.name = top;
+            buttons = inner.removeFromBottom (m.controlHeight).removeFromRight (m.buttons.total());
+        }
+        else
+        {
+            buttons = top.removeFromRight (m.buttons.total());
+            top.removeFromRight (8);
+            geometry.name = top;
+        }
+
+        auto place = [&buttons, &m] (Button& button, int width)
+        {
+            button.setBounds (buttons.removeFromRight (width).withSizeKeepingCentre (width, m.controlHeight));
+            buttons.removeFromRight (4);
+        };
+
+        place (remove, m.buttons.remove);
+        place (down, m.buttons.down);
+        place (up, m.buttons.up);
+        place (editor, m.buttons.edit);
+        buttons.removeFromRight (4);
+        place (bypass, m.buttons.bypass);
+    }
+
+    void lookAndFeelChanged() override
+    {
+        resized();
+        repaint();
     }
 
 private:
     MainComponent& owner;
     int row = 0;
 
-    Label name;
-    ToggleButton bypass { ja ("バイパス") };
+    ui::SlotRowInfo info;
+    ui::SlotRowGeometry geometry;
+
+    ui::BypassToggle bypass { ja ("バイパス") };
     TextButton editor { ja ("編集") }, up { ja ("上") }, down { ja ("下") }, remove { ja ("削除") };
+};
+
+//==============================================================================
+// Paints over the children for themes that need it (CRT scanlines); never takes mouse events.
+class MainComponent::Overlay final : public Component
+{
+public:
+    Overlay() { setInterceptsMouseClicks (false, false); }
+
+    void paint (Graphics& g) override
+    {
+        if (auto* theme = ui::findTheme (*this))
+            theme->paintOverlay (g, getLocalBounds());
+    }
 };
 
 //==============================================================================
@@ -143,11 +178,7 @@ public:
 
     int getNumRows() override { return owner.chain.size(); }
 
-    void paintListBoxItem (int row, Graphics& g, int width, int height, bool) override
-    {
-        g.setColour (Colours::white.withAlpha (row % 2 == 0 ? 0.04f : 0.0f));
-        g.fillRect (0, 0, width, height);
-    }
+    void paintListBoxItem (int, Graphics&, int, int, bool) override {}
 
     Component* refreshComponentForRow (int row, bool, Component* existing) override
     {
@@ -167,8 +198,9 @@ private:
 };
 
 //==============================================================================
-MainComponent::MainComponent()
-    : chain (formatManager),
+MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
+    : themes (themeRegistry),
+      chain (formatManager),
       deviceSelector (deviceManager, 0, 256, 0, 256, false, false, false, false)
 {
     addDefaultFormatsToManager (formatManager);
@@ -176,6 +208,9 @@ MainComponent::MainComponent()
     migrateLegacySettingsIfNeeded();
     const auto settings = loadSettings();
     StringArray restoreProblems;
+
+    themeId = ui::ThemeRegistry::sanitise (settings != nullptr ? readThemeId (*settings) : String());
+    Desktop::getInstance().setDefaultLookAndFeel (&themes.get (themeId));
 
     // Without saved settings, initialise() would open the system default devices. An empty setup
     // keeps every device closed until the user picks one: a mic wired straight to the speakers
@@ -220,22 +255,30 @@ MainComponent::MainComponent()
 
     listModel = std::make_unique<ChainListModel> (*this);
     chainList.setModel (listModel.get());
-    chainList.setRowHeight (rowHeight);
-    chainList.setColour (ListBox::backgroundColourId, Colours::black.withAlpha (0.25f));
     addAndMakeVisible (chainList);
 
     addButton.onClick = [this] { chooseFiles(); };
     addAndMakeVisible (addButton);
-    dropHint.setFont (FontOptions (12.0f));
-    dropHint.setColour (Label::textColourId, Colours::grey);
     addAndMakeVisible (dropHint);
 
-    readout = std::make_unique<Readout>();
-    addAndMakeVisible (*readout);
-
-    status.setJustificationType (Justification::centredLeft);
-    status.setColour (Label::textColourId, Colours::orange);
+    addAndMakeVisible (lcd);
     addAndMakeVisible (status);
+
+    const auto& entries = ui::ThemeRegistry::entries();
+
+    for (size_t i = 0; i < entries.size(); ++i)
+    {
+        themeSelector.addItem (entries[i].displayName, (int) i + 1);
+
+        if (themeId == entries[i].id)
+            themeSelector.setSelectedId ((int) i + 1, dontSendNotification);
+    }
+
+    themeSelector.onChange = [this] { setTheme (ui::ThemeRegistry::entries()[(size_t) themeSelector.getSelectedId() - 1].id); };
+    addAndMakeVisible (themeSelector);
+
+    overlay = std::make_unique<Overlay>();
+    addChildComponent (*overlay);
 
     if (skippedChainAfterCrash)
         showStatus (ja ("前回は読み込み中に終了したため、チェーンを読み込んでいません（元の設定: settings.crashed.xml）"));
@@ -243,6 +286,7 @@ MainComponent::MainComponent()
         showStatus (ja ("復元できなかったプラグイン: ") + restoreProblems.joinIntoString (" / "));
 
     setSize (1000, 720);
+    lookAndFeelChanged();
     updateReadout();
     startTimer (timerMs);
 }
@@ -260,30 +304,93 @@ MainComponent::~MainComponent()
 
 void MainComponent::paint (Graphics& g)
 {
-    g.fillAll (getLookAndFeel().findColour (ResizableWindow::backgroundColourId));
+    auto* theme = ui::findTheme (*this);
+
+    if (theme == nullptr)
+        return;
+
+    theme->paintWindow (g, getLocalBounds());
+    theme->paintLogo (g, logoStrip, productName, "VOICE EFFECT RACK");
+    theme->paintPanel (g, deviceTitle, deviceFrame, "AUDIO I/O", ui::PanelKind::controls);
+    theme->paintPanel (g, chainTitle, chainFrame, "EFFECT CHAIN", ui::PanelKind::list);
 }
 
 void MainComponent::resized()
 {
-    auto area = getLocalBounds().reduced (10);
+    auto* theme = ui::findTheme (*this);
 
-    auto left = area.removeFromLeft (jlimit (380, 520, area.getWidth() * 2 / 5));
-    deviceViewport.setBounds (left);
+    if (theme == nullptr)
+        return;
+
+    const auto& m = theme->getMetrics();
+    auto area = getLocalBounds().reduced (m.margin);
+
+    logoStrip = area.removeFromTop (m.logoStripHeight);
+    themeSelector.setBounds (theme->getSelectorBounds (logoStrip));
+    area.removeFromTop (10);
+
+    status.setBounds (area.removeFromBottom (m.statusHeight));
+    area.removeFromBottom (8);
+
+    // The readout grows with its text, but never takes more than 45% of the window.
+    const auto lcdHeight = jmin (lcd.getPreferredHeight (area.getWidth()), area.getHeight() * 45 / 100);
+    lcd.setBounds (area.removeFromBottom (lcdHeight));
+    area.removeFromBottom (8);
+
+    auto left = area.removeFromLeft (jlimit (320, 480, area.getWidth() * 36 / 100));
+    deviceTitle = left.removeFromTop (m.panelTitleHeight);
+    left.removeFromTop (4);
+    deviceFrame = left;
+    deviceViewport.setBounds (left.reduced (4));
     deviceSelector.setSize (deviceViewport.getMaximumVisibleWidth(), deviceSelector.getHeight());
 
-    area.removeFromLeft (12);
+    area.removeFromLeft (14);
 
-    status.setBounds (area.removeFromBottom (24));
+    chainTitle = area.removeFromTop (m.panelTitleHeight);
+    area.removeFromTop (4);
 
     auto top = area.removeFromTop (28);
-    addButton.setBounds (top.removeFromLeft (150));
-    dropHint.setBounds (top.withTrimmedLeft (8));
-    area.removeFromTop (6);
+    addButton.setBounds (top.removeFromLeft (170));
+    dropHint.setBounds (top.withTrimmedLeft (10));
+    area.removeFromTop (8);
 
-    readout->setBounds (area.removeFromBottom (190));
-    area.removeFromBottom (6);
+    chainFrame = area;
+    chainList.setBounds (area.reduced (4));
 
-    chainList.setBounds (area);
+    const auto oneLineWidth = 2 * m.rowInsetX + 8 + m.numberWidth + 8 + m.indicatorWidth + 10
+                                + m.buttons.total() + 8 + minNameWidth;
+    stackedRows = chainList.getWidth() - m.scrollbarWidth < oneLineWidth;
+    chainList.setRowHeight (stackedRows ? m.rowStacked : m.rowOneLine);
+
+    if (overlay != nullptr)
+        overlay->setBounds (getLocalBounds());
+}
+
+void MainComponent::lookAndFeelChanged()
+{
+    auto* theme = ui::findTheme (*this);
+
+    if (theme == nullptr)
+        return;
+
+    dropHint.setFont (theme->getUiFont (11.5f, false));
+    dropHint.setColour (Label::textColourId, findColour (Label::textColourId).withAlpha (0.8f));
+
+    if (overlay != nullptr)
+        overlay->setVisible (theme->hasOverlay());
+
+    lastLcdHeight = 0;
+
+    resized();
+    repaint();
+}
+
+void MainComponent::setTheme (const String& id)
+{
+    // Only the look changes; the audio graph and the device are not touched.
+    themeId = ui::ThemeRegistry::sanitise (id);
+    Desktop::getInstance().setDefaultLookAndFeel (&themes.get (themeId));
+    persist();
 }
 
 //==============================================================================
@@ -430,12 +537,13 @@ void MainComponent::chainEdited()
 //==============================================================================
 void MainComponent::showStatus (const String& text)
 {
-    status.setText (text, dontSendNotification);
+    status.setText (text);
 }
 
 void MainComponent::persist()
 {
     XmlElement root ("MIC_FX_HOST");
+    writeThemeId (root, themeId);
 
     if (auto device = deviceManager.createStateXml())
         root.addChildElement (device.release());
@@ -450,12 +558,12 @@ void MainComponent::persist()
 
 void MainComponent::updateReadout()
 {
-    String text;
+    String text, bigValue = "--.--";
     auto* device = deviceManager.getCurrentAudioDevice();
 
     if (device == nullptr)
     {
-        text << "オーディオデバイスが開いていません。\n左のパネルで入力・出力デバイスを選んでください。\n";
+        text << ja ("オーディオデバイスが開いていません。\n左のパネルで入力・出力デバイスを選んでください。\n");
     }
     else
     {
@@ -465,21 +573,25 @@ void MainComponent::updateReadout()
         const auto pluginLatency = chain.getGraph().getLatencySamples();
         const auto xruns = device->getXRunCount();
         const auto setup = deviceManager.getAudioDeviceSetup();
+        const auto totalSamples = inLatency + outLatency + pluginLatency;
 
-        text << "入力デバイス: " << setup.inputDeviceName << "  ("
+        if (sampleRate > 0)
+            bigValue = String (1000.0 * totalSamples / sampleRate, 2);
+
+        text << ja ("入力デバイス: ") << setup.inputDeviceName << "  ("
              << device->getActiveInputChannels().countNumberOfSetBits() << " ch)\n"
-             << "出力デバイス: " << setup.outputDeviceName << "  ("
+             << ja ("出力デバイス: ") << setup.outputDeviceName << "  ("
              << device->getActiveOutputChannels().countNumberOfSetBits() << " ch)\n"
-             << "サンプルレート: " << String (sampleRate, 0) << " Hz\n"
-             << "バッファサイズ: " << samplesAndMs (device->getCurrentBufferSizeSamples(), sampleRate) << "\n"
-             << "入力デバイス遅延（バッファ込み）: " << samplesAndMs (inLatency, sampleRate) << "\n"
-             << "出力デバイス遅延（バッファ込み）: " << samplesAndMs (outLatency, sampleRate) << "\n"
-             << "プラグイン遅延合計: " << samplesAndMs (pluginLatency, sampleRate) << "\n"
-             << "合計: " << samplesAndMs (inLatency + outLatency + pluginLatency, sampleRate) << "\n"
+             << ja ("サンプルレート: ") << String (sampleRate, 0) << " Hz\n"
+             << ja ("バッファサイズ: ") << samplesAndMs (device->getCurrentBufferSizeSamples(), sampleRate) << "\n"
+             << ja ("入力デバイス遅延（バッファ込み）: ") << samplesAndMs (inLatency, sampleRate) << "\n"
+             << ja ("出力デバイス遅延（バッファ込み）: ") << samplesAndMs (outLatency, sampleRate) << "\n"
+             << ja ("プラグイン遅延合計: ") << samplesAndMs (pluginLatency, sampleRate) << "\n"
+             << ja ("合計: ") << samplesAndMs (totalSamples, sampleRate) << "\n"
              << "xrun: " << (xruns >= 0 ? String (xruns) : ja ("非対応")) << "\n";
 
         if (device->getActiveInputChannels().isZero())
-            text << "入力チャンネルが選ばれていません。\n";
+            text << ja ("入力チャンネルが選ばれていません。\n");
     }
 
     for (int i = 0; i < chain.size(); ++i)
@@ -487,7 +599,15 @@ void MainComponent::updateReadout()
             text << "  " << (i + 1) << ". " << chain[i].description.name << " : "
                  << chain[i].node->getProcessor()->getLatencySamples() << " samples\n";
 
-    readout->setText (text);
+    lcd.setContent ({ "TOTAL LATENCY", bigValue, "ms", text.trimEnd() });
+
+    const auto preferred = lcd.getPreferredHeight (lcd.getWidth());
+
+    if (preferred != lastLcdHeight)
+    {
+        lastLcdHeight = preferred;
+        resized();
+    }
 }
 
 void MainComponent::timerCallback()
