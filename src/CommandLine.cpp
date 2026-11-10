@@ -1,5 +1,9 @@
 #include "CommandLine.h"
 #include "Chain.h"
+#include "Correlate.h"
+#include "Engine.h"
+#include "Measure.h"
+#include "MeasureCommand.h"
 #include "Product.h"
 #include "Settings.h"
 #include "Theme.h"
@@ -31,12 +35,20 @@ namespace
         say ("usage: " + name + " [--settings <file>]");
         say ("       " + name + " --selftest <path to .vst3> [--rate <Hz>]");
         say ("       " + name + " --selftest-settings");
+        say ("       " + name + " --selftest-correlate | --selftest-chain | --selftest-sweep");
+        say ("       " + name + " --measure | --measure-sweep --settings <file> [--runs N] [--buffer N] [--io-cycle-usage X] [--with-chain]");
         say ("       " + name + " --list-devices");
         say ("");
         say ("  --settings <file>    use this settings file instead of the default one (no migration)");
         say ("  --selftest           load a plugin through the chain and process audio without a device");
         say ("  --selftest-settings  check the settings carry-over from the pre-rename folder and the theme id");
         say ("  --list-devices       print input and output device names");
+        say ("  --selftest-correlate the delay estimator against signals with a known fractional delay");
+        say ("  --selftest-chain     hard bypass: latency, CPU and state of a bypassed slot, with test processors");
+        say ("  --selftest-sweep     the sweep's choice of the fastest clean setting and its restore of the device setup");
+        say ("  --measure            inject a test burst, record it on the output device and print the latency");
+        say ("  --measure-sweep      repeat that for buffer sizes and switches and print a table sorted by latency");
+        say ("  --tune               run the MIN LATENCY search without a window, then restore the setup");
     }
 
     int listDevices()
@@ -73,7 +85,7 @@ namespace
     Peaks processSeconds (AudioProcessorGraph& graph, double seconds)
     {
         const auto numBlocks = (int) (seconds * selfTestSampleRate / selfTestBlockSize);
-        AudioBuffer<float> buffer (2, selfTestBlockSize);
+        juce::AudioBuffer<float> buffer (2, selfTestBlockSize);
         MidiBuffer midi;
         Random random (1234);
         Peaks peaks;
@@ -180,6 +192,246 @@ namespace
         return ok ? 0 : 1;
     }
 
+
+    //==============================================================================
+    // Estimates the delay of the test burst at known fractional positions, with noise and a distractor.
+    int selfTestCorrelate()
+    {
+        bool ok = true;
+
+        auto check = [&ok] (bool condition, const String& what)
+        {
+            say (String (condition ? "ok:   " : "FAIL: ") + what);
+            ok = ok && condition;
+        };
+
+        const auto toleranceMs = 0.05;
+        double worstMs = 0.0;
+        Random random (42);
+
+        for (const auto rate : { 44100.0, 48000.0, 96000.0 })
+            for (const auto delay : { 1234.37, 2000.5, 33.9, 9000.012 })
+            {
+                const auto reference = measure::makeTestSignal (rate);
+                std::vector<float> recording ((size_t) (0.5 * rate), 0.0f);
+
+                // The exact burst, shifted by a fractional delay, over a noise floor 40 dB down, with a
+                // half-amplitude echo further on that must not be taken for the burst.
+                for (size_t i = 0; i < recording.size(); ++i)
+                {
+                    const auto t = ((double) i - delay) / rate;
+                    const auto echo = ((double) i - delay - 0.2 * rate) / rate;
+                    recording[i] = (float) (measure::testSignalAt (rate, t) + 0.5 * measure::testSignalAt (rate, echo)
+                                            + 0.001 * (random.nextDouble() * 2.0 - 1.0));
+                }
+
+                const auto estimate = measure::estimateDelay (reference.data(), (int) reference.size(), recording.data(), (int) recording.size());
+                const auto errorMs = std::abs (estimate.delaySamples - delay) / rate * 1000.0;
+                worstMs = jmax (worstMs, errorMs);
+
+                if (errorMs >= toleranceMs || ! measure::isTrustworthy (estimate))
+                    check (false, String (rate, 0) + " Hz, delay " + String (delay, 3) + " samples: estimated " + String (estimate.delaySamples, 3));
+            }
+
+        check (worstMs < toleranceMs, "all 12 delays recovered within " + String (toleranceMs) + " ms (worst " + String (worstMs, 5) + " ms)");
+
+        {
+            // Noise alone must not pass for a measurement.
+            const auto reference = measure::makeTestSignal (48000.0);
+            std::vector<float> noise (24000);
+
+            for (auto& v : noise)
+                v = 0.05f * (random.nextFloat() * 2.0f - 1.0f);
+
+            const auto estimate = measure::estimateDelay (reference.data(), (int) reference.size(), noise.data(), (int) noise.size());
+            check (! measure::isTrustworthy (estimate), "noise alone is rejected (correlation " + String (estimate.coefficient, 3) + ")");
+        }
+
+        {
+            const auto summary = measure::summarise ({ 3.0, 1.0, 2.0, 10.0 });
+            check (summary.median == 2.5 && summary.minimum == 1.0 && summary.maximum == 10.0, "median, minimum and maximum");
+        }
+
+        say (ok ? "SELFTEST CORRELATE OK" : "SELFTEST CORRELATE FAILED");
+        return ok ? 0 : 1;
+    }
+
+    //==============================================================================
+    // A stand-in for a plugin that reports latency, really delays by it, has a bypass parameter (as most
+    // VST3 plugins do, so a soft bypass would keep the latency) and keeps one value as its state.
+    class LatentProcessor final : public AudioProcessor
+    {
+    public:
+        explicit LatentProcessor (int latency)
+            : AudioProcessor (BusesProperties().withInput ("In", AudioChannelSet::stereo()).withOutput ("Out", AudioChannelSet::stereo())),
+              delayLine ((size_t) latency + 1, 0.0f)
+        {
+            setLatencySamples (latency);
+            addParameter (bypass = new AudioParameterBool ({ "bypass", 1 }, "Bypass", false));
+        }
+
+        void processBlock (juce::AudioBuffer<float>& buffer, MidiBuffer&) override
+        {
+            ++blocks;
+
+            // Both channels carry the same signal in these tests, so one delay line is enough.
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                delayLine[(size_t) writeIndex] = buffer.getSample (0, i);
+                writeIndex = (writeIndex + 1) % (int) delayLine.size();
+                const auto out = delayLine[(size_t) writeIndex];
+
+                for (int c = 0; c < buffer.getNumChannels(); ++c)
+                    buffer.setSample (c, i, out);
+            }
+        }
+
+        using AudioProcessor::processBlock;
+
+        void reset() override                           { std::fill (delayLine.begin(), delayLine.end(), 0.0f); }
+        AudioProcessorParameter* getBypassParameter() const override { return bypass; }
+
+        const String getName() const override           { return "Latent"; }
+        double getTailLengthSeconds() const override    { return 0.0; }
+        bool acceptsMidi() const override               { return false; }
+        bool producesMidi() const override              { return false; }
+        bool hasEditor() const override                 { return false; }
+        AudioProcessorEditor* createEditor() override   { return nullptr; }
+        int getNumPrograms() override                   { return 1; }
+        int getCurrentProgram() override                { return 0; }
+        void setCurrentProgram (int) override {}
+        const String getProgramName (int) override      { return {}; }
+        void changeProgramName (int, const String&) override {}
+        void prepareToPlay (double, int) override {}
+        void releaseResources() override {}
+        void getStateInformation (MemoryBlock& destination) override { destination.replaceAll (&marker, sizeof (marker)); }
+        void setStateInformation (const void* data, int size) override { if (size == (int) sizeof (marker)) memcpy (&marker, data, sizeof (marker)); }
+
+        int marker = 0;
+        int blocks = 0;
+
+    private:
+        AudioParameterBool* bypass = nullptr;
+        std::vector<float> delayLine;
+        int writeIndex = 0;
+    };
+
+    // Position of the first output sample above half scale after an impulse at the start, or -1.
+    int measureImpulseDelay (AudioProcessorGraph& graph)
+    {
+        juce::AudioBuffer<float> buffer (2, selfTestBlockSize);
+        MidiBuffer midi;
+
+        for (int block = 0; block < 40; ++block)
+        {
+            buffer.clear();
+
+            if (block == 0)
+                buffer.setSample (0, 0, 1.0f);
+
+            graph.processBlock (buffer, midi);
+
+            for (int i = 0; i < selfTestBlockSize; ++i)
+                if (buffer.getSample (0, i) > 0.5f)
+                    return block * selfTestBlockSize + i;
+        }
+
+        return -1;
+    }
+
+    int selfTestChain()
+    {
+        bool ok = true;
+
+        auto check = [&ok] (bool condition, const String& what)
+        {
+            say (String (condition ? "ok:   " : "FAIL: ") + what);
+            ok = ok && condition;
+        };
+
+        selfTestSampleRate = 48000.0;
+        AudioPluginFormatManager formats;
+        Chain chain (formats);
+        prepareGraph (chain);
+
+        constexpr int latency = 184;
+        auto owned = std::make_unique<LatentProcessor> (latency);
+        auto* plugin = owned.get();
+        plugin->marker = 4711;
+        PluginDescription description;
+        description.name = "Latent";
+        chain.addProcessor (std::move (owned), description);
+        auto& graph = chain.getGraph();
+
+        check (graph.getLatencySamples() == latency, "active slot: graph reports " + String (graph.getLatencySamples()) + " samples");
+        check (measureImpulseDelay (graph) == latency, "active slot: the impulse really arrives " + String (latency) + " samples late");
+
+        chain.setBypassed (0, true);
+        check (graph.getLatencySamples() == 0, "bypassed slot: graph reports " + String (graph.getLatencySamples()) + " samples (was " + String (latency) + ")");
+        check (plugin->isSuspended(), "bypassed slot: the plugin is suspended");
+
+        const auto blocksBefore = plugin->blocks;
+        check (measureImpulseDelay (graph) == 0, "bypassed slot: the impulse passes with no delay");
+        check (plugin->blocks == blocksBefore, "bypassed slot: processBlock is no longer called");
+
+        MemoryBlock state;
+        plugin->getStateInformation (state);
+        check (plugin->marker == 4711 && state.getSize() == sizeof (int), "bypassed slot: the plugin instance keeps its state");
+        check (chain[0].bypassed && chain[0].isLive(), "bypassed slot: the chain still lists it as bypassed and live");
+
+        chain.setBypassed (0, false);
+        check (graph.getLatencySamples() == latency && ! plugin->isSuspended(), "un-bypassed: latency is back to " + String (graph.getLatencySamples()));
+        check (measureImpulseDelay (graph) == latency, "un-bypassed: the impulse is delayed again, with no stale audio from before");
+
+        chain.setForceBypassAll (true);
+        check (graph.getLatencySamples() == 0 && ! chain[0].bypassed, "forced bypass of everything: latency 0 and the slot's own flag untouched");
+        chain.setForceBypassAll (false);
+        check (graph.getLatencySamples() == latency, "forced bypass released: latency " + String (graph.getLatencySamples()));
+
+        say (ok ? "SELFTEST CHAIN OK" : "SELFTEST CHAIN FAILED");
+        return ok ? 0 : 1;
+    }
+
+    //==============================================================================
+    int selfTestSweep()
+    {
+        bool ok = true;
+
+        auto check = [&ok] (bool condition, const String& what)
+        {
+            say (String (condition ? "ok:   " : "FAIL: ") + what);
+            ok = ok && condition;
+        };
+
+        using measure::Candidate;
+        const std::vector<Candidate> rows {
+            { true, 6.0, 0, 0 }, { true, 3.0, 2, 0 }, { true, 4.0, 0, 3 }, { true, 5.0, 0, 0 }, { false, 0.0, 0, 0 }, { true, 4.5, 0, 0 } };
+
+        check (measure::pickBest (rows) == 5, "the fastest row without overloads or late callbacks wins (not the 3.0 ms one with overloads)");
+        check (measure::pickBest ({ { true, 3.0, 1, 0 }, { false, 0.0, 0, 0 } }) == -1, "no clean row means no winner");
+        check (measure::isFaster ({ true, 9.0, 0, 0 }, { false, 0.0, 0, 0 }) && ! measure::isFaster ({ false, 0.0, 0, 0 }, { true, 9.0, 0, 0 }),
+               "rows that could not be measured sort last");
+
+        {
+            Engine engine;
+            engine.openDevices (nullptr);
+            engine.start();
+
+            {
+                const ScopedSetup guard (engine);
+                engine.setExperiments ({ 0.25f });
+                engine.chain.setForceBypassAll (true);
+                engine.callback.setInjecting (true);
+            }
+
+            check (! engine.getExperiments().ioCycleUsage.has_value(), "the experiment switch is back to its default after the scope");
+            check (engine.deviceManager.getCurrentAudioDevice() == nullptr, "no device was opened by the restore");
+        }
+
+        say (ok ? "SELFTEST SWEEP OK" : "SELFTEST SWEEP FAILED");
+        return ok ? 0 : 1;
+    }
+
     int selfTest (const String& path)
     {
         const File file (path);
@@ -238,6 +490,8 @@ namespace
         chain.setBypassed (0, true);
         const auto bypassed = processSeconds (graph, 0.5);
         const auto bypassedOk = bypassed.left > 0.05f && bypassed.right > 0.05f;
+        const auto bypassedLatency = graph.getLatencySamples();
+        say ("latency while bypassed: graph " + String (bypassedLatency) + " samples (a hard bypass leaves the path)");
         say ("bypass pass-through: L " + String (bypassed.left, 4) + "  R " + String (bypassed.right, 4)
              + (bypassedOk ? "  (mono input reaches both sides)" : "  (NO SIGNAL)"));
 
@@ -252,7 +506,7 @@ namespace
         for (auto& problem : problems)
             say ("  restore problem: " + problem);
 
-        const auto success = activePeak > 1.0e-6f && bypassedOk && roundTripOk;
+        const auto success = activePeak > 1.0e-6f && bypassedOk && roundTripOk && bypassedLatency == 0;
         say (success ? "SELFTEST OK" : "SELFTEST FAILED");
         return success ? 0 : 1;
     }
@@ -260,8 +514,9 @@ namespace
 
 bool isCommandLineMode (const StringArray& args)
 {
-    return args.contains ("--selftest") || args.contains ("--selftest-settings")
-        || args.contains ("--list-devices") || args.contains ("--help");
+    return args.contains ("--selftest") || args.contains ("--selftest-correlate") || args.contains ("--selftest-chain")
+        || args.contains ("--selftest-sweep") || args.contains ("--selftest-settings")
+        || args.contains ("--list-devices") || args.contains ("--help") || isMeasureMode (args);
 }
 
 bool applySettingsOption (const StringArray& args)
@@ -291,8 +546,28 @@ int runCommandLine (const StringArray& args)
     if (args.contains ("--list-devices"))
         return listDevices();
 
+    if (isMeasureMode (args))
+    {
+        if (! applySettingsOption (args))
+        {
+            printUsage();
+            return 64;
+        }
+
+        return runMeasureCommand (args);
+    }
+
     if (args.contains ("--selftest-settings"))
         return selfTestSettings();
+
+    if (args.contains ("--selftest-correlate"))
+        return selfTestCorrelate();
+
+    if (args.contains ("--selftest-chain"))
+        return selfTestChain();
+
+    if (args.contains ("--selftest-sweep"))
+        return selfTestSweep();
 
     if (const auto rate = args.indexOf ("--rate"); rate >= 0 && rate + 1 < args.size() && args[rate + 1].getDoubleValue() > 0.0)
         selfTestSampleRate = args[rate + 1].getDoubleValue();
