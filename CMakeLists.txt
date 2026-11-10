@@ -91,4 +91,4 @@ foreach(plugin IN LISTS MFX_TEST_PLUGINS)
     endif()
 endforeach()
 
-add_test(NAME "${MFX_PRODUCT_NAME} settings migration" COMMAND MicFxHost --selftest-settings)
+add_test(NAME "${MFX_PRODUCT_NAME} settings migration and theme" COMMAND MicFxHost --selftest-settings)

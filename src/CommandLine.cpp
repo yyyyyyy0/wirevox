@@ -2,6 +2,7 @@
 #include "Chain.h"
 #include "Product.h"
 #include "Settings.h"
+#include "Theme.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -33,7 +34,7 @@ namespace
         say ("");
         say ("  --settings <file>    use this settings file instead of the default one (no migration)");
         say ("  --selftest           load a plugin through the chain and process audio without a device");
-        say ("  --selftest-settings  check the carry-over of settings from the pre-rename folder");
+        say ("  --selftest-settings  check the settings carry-over from the pre-rename folder and the theme id");
         say ("  --list-devices       print input and output device names");
     }
 
@@ -142,6 +143,32 @@ namespace
 
             check (migrateLegacySettings (home) == Migration::notNeeded, "nothing happens without a legacy file");
             check (! defaultSettingsFile (home).getParentDirectory().exists(), "no settings folder is created without a legacy file");
+        }
+
+        {
+            // Settings go to a temporary file only; the override is cleared again below.
+            useSettingsFile (root.getChildFile ("theme/settings.xml"));
+
+            for (auto& entry : ui::ThemeRegistry::entries())
+            {
+                XmlElement saved ("MIC_FX_HOST");
+                writeThemeId (saved, entry.id);
+                const auto loaded = saveSettings (saved) ? loadSettings() : nullptr;
+
+                check (loaded != nullptr && ui::ThemeRegistry::sanitise (readThemeId (*loaded)) == entry.id,
+                       String ("theme '") + entry.id + "' is saved and restored");
+            }
+
+            XmlElement unknown ("MIC_FX_HOST");
+            writeThemeId (unknown, "no-such-theme");
+            check (ui::ThemeRegistry::sanitise (readThemeId (unknown)) == ui::ThemeRegistry::getDefaultId(),
+                   "an unknown theme id falls back to the default");
+
+            const XmlElement unset ("MIC_FX_HOST");
+            check (ui::ThemeRegistry::sanitise (readThemeId (unset)) == ui::ThemeRegistry::getDefaultId(),
+                   "settings without a theme use the default");
+
+            useSettingsFile ({});
         }
 
         check (defaultSettingsFile (root).getFullPathName().contains (String ("/") + productName + "/settings.xml"),
