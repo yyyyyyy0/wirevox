@@ -9,5 +9,6 @@ namespace mfx::ui
 std::unique_ptr<Theme> createRack84Theme();
 std::unique_ptr<Theme> createTerminalTheme();
 std::unique_ptr<Theme> createDesktop95Theme();
+std::unique_ptr<Theme> createNeonTheme();
 
 } // namespace mfx::ui

@@ -10,6 +10,7 @@ const std::vector<ThemeEntry>& ThemeRegistry::entries()
         { "rack84",    "RACK '84",    &createRack84Theme },
         { "terminal",  "TERMINAL",    &createTerminalTheme },
         { "desktop95", "DESKTOP '95", &createDesktop95Theme },
+        { "neon",      "NEON",        &createNeonTheme },
     };
 
     return table;
