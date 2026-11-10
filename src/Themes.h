@@ -7,5 +7,6 @@ namespace mfx::ui
 {
 
 std::unique_ptr<Theme> createRack84Theme();
+std::unique_ptr<Theme> createTerminalTheme();
 
 } // namespace mfx::ui
