@@ -205,7 +205,7 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
 {
     addDefaultFormatsToManager (formatManager);
 
-    migrateLegacySettingsIfNeeded();
+    const auto migration = migrateLegacySettingsIfNeeded();
     const auto settings = loadSettings();
     StringArray restoreProblems;
 
@@ -274,13 +274,22 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
             themeSelector.setSelectedId ((int) i + 1, dontSendNotification);
     }
 
-    themeSelector.onChange = [this] { setTheme (ui::ThemeRegistry::entries()[(size_t) themeSelector.getSelectedId() - 1].id); };
+    themeSelector.onChange = [this]
+    {
+        const auto& all = ui::ThemeRegistry::entries();
+        const auto index = themeSelector.getSelectedId() - 1;
+
+        if (isPositiveAndBelow (index, (int) all.size()))
+            setTheme (all[(size_t) index].id);
+    };
     addAndMakeVisible (themeSelector);
 
     overlay = std::make_unique<Overlay>();
     addChildComponent (*overlay);
 
-    if (skippedChainAfterCrash)
+    if (migration == Migration::failed)
+        showStatus (ja ("以前の設定を引き継げませんでした: ") + legacySettingsFile (File::getSpecialLocation (File::userHomeDirectory)).getFullPathName());
+    else if (skippedChainAfterCrash)
         showStatus (ja ("前回は読み込み中に終了したため、チェーンを読み込んでいません（元の設定: settings.crashed.xml）"));
     else if (! restoreProblems.isEmpty())
         showStatus (ja ("復元できなかったプラグイン: ") + restoreProblems.joinIntoString (" / "));

@@ -55,10 +55,9 @@ void useSettingsFile (const File& file)
     settingsFileOverride = file;
 }
 
-void migrateLegacySettingsIfNeeded()
+Migration migrateLegacySettingsIfNeeded()
 {
-    if (settingsFileOverride == File())
-        migrateLegacySettings (home());
+    return settingsFileOverride == File() ? migrateLegacySettings (home()) : Migration::notNeeded;
 }
 
 File getSettingsFile()

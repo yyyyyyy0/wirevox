@@ -18,7 +18,7 @@ Migration migrateLegacySettings (const juce::File& home);
 void useSettingsFile (const juce::File&);
 
 // Runs the migration against the real home directory unless --settings was given.
-void migrateLegacySettingsIfNeeded();
+Migration migrateLegacySettingsIfNeeded();
 
 juce::File getSettingsFile();
 
