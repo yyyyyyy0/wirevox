@@ -58,6 +58,7 @@ target_sources(Wirevox PRIVATE
     src/Monitor.cpp
     src/HostCallback.cpp
     src/Engine.cpp
+    src/BackgroundLoad.cpp
     src/LatencyTuner.cpp
     src/Measure.cpp
     src/SelfTests.cpp

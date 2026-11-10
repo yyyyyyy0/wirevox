@@ -293,6 +293,12 @@ namespace
         Report report;
         Session s;
 
+        if (args.contains ("--headroom") && args.contains ("--fastest"))
+        {
+            report.line ("FAIL: --headroom and --fastest cannot be used together");
+            return 2;
+        }
+
         if (const auto problem = openSession (s, args, true, report); problem.isNotEmpty())
         {
             report.line ("FAIL: " + problem);
@@ -303,8 +309,12 @@ namespace
 
         {
             const ScopedSetup guard (s.engine);
+            // The window's default is headroom; scripts keep the search they have always had unless they ask.
+            const auto mode = args.contains ("--headroom") ? TuneMode::headroom : TuneMode::fastest;
             LatencyTuner tuner (s.engine);
-            tuner.start();
+            report.line (String ("mode: ") + (mode == TuneMode::headroom ? "headroom (background load, at most 50 % of the buffer, cycle usage left at the default)"
+                                                                         : "fastest (quiet machine)"));
+            tuner.start (mode);
             String last;
 
             while (tuner.isRunning())

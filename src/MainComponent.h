@@ -54,8 +54,14 @@ private:
     void refreshStatus();
     void updateReadout();
     std::optional<Breakdown> updateBreakdown();
-    void startTuning();
+    void chooseTuneMode();
+    void startTuning (TuneMode);
     void tuningEnded();
+    void setViewMode (ViewMode);
+    void applyViewMode();
+    String takeMonitorProblem();
+    String monitorNote();
+    String describeSimple (const std::optional<Breakdown>&, String& bigValue);
     void askToMeasure();
     void startMeasuring();
     void measuringEnded();
@@ -72,6 +78,7 @@ private:
 
     ui::ThemeRegistry& themes;
     String themeId;
+    Preferences prefs;
 
     Engine engine;
     Chain& chain = engine.chain;
@@ -86,6 +93,7 @@ private:
     ComboBox monitorDevice, monitorPair;
     TextButton addButton { ja ("プラグインを追加...") };
     TextButton minLatencyButton { "MIN LATENCY" };
+    TextButton viewButton;
     Label dropHint { {}, ja (".vst3 をこのウィンドウにドロップしても追加できます") };
     std::unique_ptr<ChainListModel> listModel;
     ListBox chainList;
@@ -106,7 +114,9 @@ private:
     std::unique_ptr<FileChooser> chooser;
     std::map<AudioProcessor*, std::unique_ptr<EditorWindow>> editors;
     int ticksSinceSave = 0;
-    String statusMessage, standingWarning;
+    String statusMessage, standingWarning, lastMonitorProblem;
+    String heaviestPlugin;
+    double heaviestPercent = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

@@ -43,7 +43,7 @@ namespace
         say ("       " + name + " --selftest-correlate | --selftest-chain | --selftest-sweep | --selftest-timing | --selftest-engine");
         say ("       " + name + " --selftest-breakdown | --selftest-processtime | --selftest-monitor");
         say ("       " + name + " --probe-monitor \"<main output>\" \"<monitor device>\"");
-        say ("       " + name + " --measure | --measure-sweep | --tune --settings <file> [--runs N] [--buffer N] [--io-cycle-usage X] [--with-chain] [--force]");
+        say ("       " + name + " --measure | --measure-sweep | --tune --settings <file> [--runs N] [--buffer N] [--io-cycle-usage X] [--with-chain] [--headroom | --fastest] [--force]");
         say ("       " + name + " --list-devices");
         say ("");
         say ("  --settings <file>    use this settings file instead of the default one (no migration)");
@@ -61,7 +61,7 @@ namespace
         say ("  --probe-monitor      make the monitor's aggregate device as the app would, print the devices' rates and the channel layout, destroy it (no IO)");
         say ("  --measure            inject a test burst, record it on the output device and print the latency");
         say ("  --measure-sweep      repeat that for buffer sizes and switches and print a table sorted by latency");
-        say ("  --tune               run the MIN LATENCY search without a window, then restore the setup");
+        say ("  --tune               run the MIN LATENCY search without a window, then restore the setup (--headroom: with a background load and room to spare; --fastest, the default: today's search)");
         say ("  --force              run a measurement although another " + name + " process is running (the devices are opened a second time)");
     }
 

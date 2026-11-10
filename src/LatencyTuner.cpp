@@ -9,7 +9,6 @@ namespace
     constexpr int watchTicks = 12;          // 3 s
     constexpr int confirmTicks = 48;        // 12 s
     constexpr int settleAfterReopen = 3;    // 0.75 s
-    constexpr double maxLoadPercent = 85.0;
     constexpr int largestBuffer = 1024;
 }
 
@@ -18,6 +17,22 @@ LatencyTuner::LatencyTuner (Engine& e) : engine (e) {}
 LatencyTuner::~LatencyTuner()
 {
     cancel();
+
+    if (backgroundLoad != nullptr)
+        backgroundLoad->stop();
+}
+
+void LatencyTuner::setBackgroundLoad (std::unique_ptr<BackgroundLoad> newLoad)
+{
+    if (backgroundLoad != nullptr)
+        backgroundLoad->stop();
+
+    backgroundLoad = std::move (newLoad);
+}
+
+double LatencyTuner::bufferLoadLimit() const noexcept
+{
+    return mode == TuneMode::headroom ? headroomMaxLoadPercent : fastestMaxLoadPercent;
 }
 
 void LatencyTuner::setReader (std::function<Reading()> newReader)
@@ -30,9 +45,10 @@ bool LatencyTuner::isClean (int overloads, int64 late, double maxLoad, double al
     return overloads == 0 && late == 0 && maxLoad <= allowedPercent;
 }
 
-void LatencyTuner::start()
+void LatencyTuner::start (TuneMode newMode)
 {
     result.clear();
+    mode = newMode;
     auto* device = engine.deviceManager.getCurrentAudioDevice();
 
     if (device == nullptr)
@@ -71,6 +87,16 @@ void LatencyTuner::start()
     lastCleanUsageIndex = -1;
     direction = 0;          // decided by the first step
     engine.holdPersistedAudio();
+
+    // A lower cycle usage shrinks the time the callback may take, which is what headroom is for.
+    if (mode == TuneMode::headroom)
+    {
+        if (backgroundLoad == nullptr)
+            backgroundLoad = makeThreadedBackgroundLoad();
+
+        engine.setExperiments ({});
+    }
+
     phase = Phase::buffer;
     beginStep();
 }
@@ -84,8 +110,14 @@ void LatencyTuner::cancel()
 void LatencyTuner::beginStep()
 {
     monitorDropped = false;
+
+    // The device is reopened below; the load comes back once it has settled (see tick()).
+    if (backgroundLoad != nullptr)
+        backgroundLoad->stop();
+
     const auto confirming = phase == Phase::confirmBuffer || phase == Phase::confirmUsage;
-    const auto suffix = confirming ? ja (" を長めに確認中") : ja (" を確認中");
+    const auto suffix = String (confirming ? ja (" を長めに確認中") : ja (" を確認中"))
+                      + (mode == TuneMode::headroom ? ja ("（背景の負荷を掛けています）") : String());
 
     if (phase == Phase::buffer || phase == Phase::confirmBuffer)
     {
@@ -140,7 +172,7 @@ bool LatencyTuner::stepIsClean() const
 
     const auto usagePhase = phase == Phase::usage || phase == Phase::confirmUsage;
     const auto usage = phase == Phase::usage ? usages[usageIndex] : phase == Phase::confirmUsage ? usages[lastCleanUsageIndex] : 1.0f;
-    const auto allowed = usagePhase ? jmin (maxLoadPercent, 60.0 * (double) usage) : maxLoadPercent;
+    const auto allowed = usagePhase ? jmin (bufferLoadLimit(), 60.0 * (double) usage) : bufferLoadLimit();
     return isClean (reading.overloads, reading.late, reading.maxPercent, allowed);
 }
 
@@ -173,6 +205,9 @@ bool LatencyTuner::tick()
             engine.refreshHal();
             engine.resetOverloads();
             engine.callback.resetLoad();
+
+            if (mode == TuneMode::headroom && backgroundLoad != nullptr)
+                backgroundLoad->start();
         }
 
         return false;
@@ -225,6 +260,13 @@ void LatencyTuner::advance()
         {
             if (clean)
             {
+                // Headroom keeps the device's default cycle usage, so the search ends with the buffer.
+                if (mode == TuneMode::headroom)
+                {
+                    finish ({}, Outcome::settle);
+                    return;
+                }
+
                 phase = Phase::usage;
                 usageIndex = 0;
                 beginStep();
@@ -294,6 +336,10 @@ void LatencyTuner::finish (const String& reason, Outcome outcome)
 {
     String text = reason;
 
+    // Whatever ends the run, the synthetic load ends with it, before the device is opened for the last time.
+    if (backgroundLoad != nullptr)
+        backgroundLoad->stop();
+
     // The saved monitor choice is back before the final open, which makes a new device for it if it is needed.
     if (monitorWasActive && outcome != Outcome::abandon)
         engine.setMonitorPlan (originalMonitor, false);
@@ -328,8 +374,11 @@ void LatencyTuner::finish (const String& reason, Outcome outcome)
 
     if (text.isEmpty())
     {
-        text = ja ("最小遅延: バッファ ") + String (sizes[lastCleanIndex]);
+        text = ja (mode == TuneMode::headroom ? "最小遅延（余裕あり）: バッファ " : "最小遅延（最速）: バッファ ") + String (sizes[lastCleanIndex]);
         text << (lastCleanUsageIndex >= 0 ? ja (" / サイクル使用率 ") + String (usages[lastCleanUsageIndex], 2) : ja (" / サイクル使用率は既定のまま"));
+
+        if (mode == TuneMode::headroom)
+            text << ja ("。ゲームを動かしたまま押すと、より実際に近い結果になります");
     }
 
     if (monitorWasActive && outcome != Outcome::abandon && ! engine.isMonitorActive())

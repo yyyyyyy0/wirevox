@@ -10,6 +10,7 @@ namespace
     constexpr int minNameWidth = 150;
     constexpr int minChainListHeight = 130;
     constexpr int minBreakdownHeight = 110;
+    constexpr int viewButtonWidth = 110;
     constexpr int measureRuns = 6;
     constexpr int timerMs = 250;
     constexpr int ticksPerSave = 120;
@@ -221,13 +222,17 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     StringArray restoreProblems;
 
     themeId = ui::ThemeRegistry::sanitise (settings != nullptr ? readThemeId (*settings) : String());
+
+    // Without a settings file this is a first run: it starts in the simple view.
+    if (settings != nullptr)
+        prefs = { readTuneMode (*settings), readViewMode (*settings) };
     Desktop::getInstance().setDefaultLookAndFeel (&themes.get (themeId));
 
     // Without saved settings, initialise() would open the system default devices. An empty setup
     // keeps every device closed until the user picks one: a mic wired straight to the speakers
     // on first launch would feed back.
     engine.openFromSettings (settings.get());
-    const auto monitorProblem = engine.takeMonitorProblem();
+    const auto monitorProblem = takeMonitorProblem();
 
     bool skippedChainAfterCrash = false;
 
@@ -284,9 +289,26 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     addButton.onClick = [this] { chooseFiles(); };
     addAndMakeVisible (addButton);
 
-    minLatencyButton.onClick = [this] { startTuning(); };
-    minLatencyButton.setTooltip (ja ("バッファサイズとIOサイクル使用率を下げながら、音切れ（オーバーロード）が出ない最小の遅延を探します。数十秒かかり、その間は音が途切れます"));
+    minLatencyButton.onClick = [this]
+    {
+        if (tuner.isRunning())
+        {
+            tuner.cancel();
+            tuningEnded();
+        }
+        else if (measureSession == nullptr)
+        {
+            chooseTuneMode();
+        }
+    };
+    minLatencyButton.setTooltip (ja ("音切れ（オーバーロード）が出ない最小の遅延を探します。余裕ありはゲームや配信を動かしている間の負荷を見込み、最速は静かなときの限界まで下げます。数十秒かかり、その間は音が途切れます。ゲームを動かしたまま押すと、より実際に近い結果になります"));
     addAndMakeVisible (minLatencyButton);
+
+    viewButton.onClick = [this] { setViewMode (prefs.view == ViewMode::simple ? ViewMode::detail : ViewMode::simple); };
+    viewButton.setTooltip (ja ("かんたん表示は合計の遅延と、気をつけることだけを出します。詳細表示はすべての数字を出します"));
+    addAndMakeVisible (viewButton);
+    breakdown.setCompact (prefs.view == ViewMode::simple);
+    viewButton.setButtonText (prefs.view == ViewMode::simple ? ja ("詳細を表示") : ja ("かんたん表示"));
     addAndMakeVisible (dropHint);
 
     addAndMakeVisible (lcd);
@@ -370,7 +392,7 @@ void MainComponent::paint (Graphics& g)
     theme->paintPanel (g, chainTitle, chainFrame, "EFFECT CHAIN", ui::PanelKind::list);
 
     if (! breakdownFrame.isEmpty())
-        theme->paintPanel (g, breakdownTitle, breakdownFrame, "LATENCY BREAKDOWN", ui::PanelKind::list);
+        theme->paintPanel (g, breakdownTitle, breakdownFrame, breakdown.isCompact() ? "MEASURE" : "LATENCY BREAKDOWN", ui::PanelKind::list);
 }
 
 void MainComponent::resized()
@@ -384,7 +406,9 @@ void MainComponent::resized()
     auto area = getLocalBounds().reduced (m.margin);
 
     logoStrip = area.removeFromTop (m.logoStripHeight);
-    themeSelector.setBounds (theme->getSelectorBounds (logoStrip));
+    const auto selector = theme->getSelectorBounds (logoStrip);
+    themeSelector.setBounds (selector);
+    viewButton.setBounds (selector.translated (-(viewButtonWidth + 8), 0).withWidth (viewButtonWidth));
     area.removeFromTop (10);
 
     status.setBounds (area.removeFromBottom (m.statusHeight));
@@ -644,20 +668,29 @@ void MainComponent::refreshStatus()
     status.setText (progress.isNotEmpty() ? progress : statusMessage.isNotEmpty() ? statusMessage : standingWarning);
 }
 
-void MainComponent::startTuning()
+// The mode is chosen where the key is pressed, so that the choice is one click and is remembered.
+void MainComponent::chooseTuneMode()
 {
-    if (tuner.isRunning())
+    PopupMenu menu;
+    menu.addItem (1, ja ("余裕あり（ゲーム・配信向け）"), true, prefs.tune == TuneMode::headroom);
+    menu.addItem (2, ja ("最速（静かなとき向け）"), true, prefs.tune == TuneMode::fastest);
+
+    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (minLatencyButton), [safe = SafePointer<MainComponent> (this)] (int result)
     {
-        tuner.cancel();
-        tuningEnded();
-        return;
-    }
+        if (safe != nullptr && result > 0)
+            safe->startTuning (result == 1 ? TuneMode::headroom : TuneMode::fastest);
+    });
+}
 
-    if (measureSession != nullptr)
+void MainComponent::startTuning (TuneMode mode)
+{
+    // The menu can outlive a run or a measurement that was started in the meantime.
+    if (tuner.isRunning() || measureSession != nullptr)
         return;
 
+    prefs.tune = mode;
     showStatus ({});
-    tuner.start();
+    tuner.start (mode);
 
     if (tuner.isRunning())
         updateBusyState();
@@ -684,6 +717,26 @@ void MainComponent::updateBusyState()
     chainList.setEnabled (! busy);
     breakdown.setMeasuring (measuring, ! tuning && deviceManager.getCurrentAudioDevice() != nullptr);
     refreshStatus();
+}
+
+void MainComponent::setViewMode (ViewMode mode)
+{
+    prefs.view = mode;
+    applyViewMode();
+    persist();
+}
+
+void MainComponent::applyViewMode()
+{
+    const auto simple = prefs.view == ViewMode::simple;
+
+    viewButton.setButtonText (simple ? ja ("詳細を表示") : ja ("かんたん表示"));
+    breakdown.setCompact (simple);
+    lastLcdHeight = 0;
+    lastBreakdownHeight = 0;
+    updateReadout();
+    resized();
+    repaint();
 }
 
 void MainComponent::tuningEnded()
@@ -791,6 +844,8 @@ void MainComponent::applyMonitor (bool deviceChanged)
     if (isBusy())
         return;
 
+    lastMonitorProblem.clear();
+
     auto plan = engine.getMonitorPlan();
     plan.enabled = monitorToggle.getToggleState();
 
@@ -818,13 +873,39 @@ void MainComponent::applyMonitor (bool deviceChanged)
     engine.setMonitorPlan (plan);
     chain.rewire();
 
-    if (const auto problem = engine.takeMonitorProblem(); problem.isNotEmpty())
+    if (const auto problem = takeMonitorProblem(); problem.isNotEmpty())
         message = problem;
 
     refreshMonitorControls();
     showStatus (message);
     persist();
     updateReadout();
+}
+
+// What the engine says about the monitor is shown once in the status line; the simple view keeps saying it
+// for as long as the monitor is not running.
+String MainComponent::takeMonitorProblem()
+{
+    auto problem = engine.takeMonitorProblem();
+
+    if (problem.isNotEmpty())
+        lastMonitorProblem = problem;
+
+    return problem;
+}
+
+String MainComponent::monitorNote()
+{
+    if (engine.isMonitorActive())
+    {
+        lastMonitorProblem.clear();
+        return {};
+    }
+
+    if (lastMonitorProblem.isNotEmpty())
+        return lastMonitorProblem;
+
+    return engine.getMonitorPlan().enabled ? ja ("モニターは待機中です") : String();
 }
 
 void MainComponent::serviceMonitor()
@@ -835,7 +916,7 @@ void MainComponent::serviceMonitor()
     chain.rewire();
     refreshMonitorControls();
 
-    if (const auto problem = engine.takeMonitorProblem(); problem.isNotEmpty())
+    if (const auto problem = takeMonitorProblem(); problem.isNotEmpty())
         showStatus (problem);
 
     persist();
@@ -874,7 +955,7 @@ void MainComponent::fillMonitorPairs (const String& deviceName, int firstChannel
 
 void MainComponent::persist()
 {
-    if (! saveSettings (*buildSettingsXml (themeId, engine)))
+    if (! saveSettings (*buildSettingsXml (themeId, engine, prefs)))
         showStatus (ja ("設定ファイルを保存できませんでした: ") + getSettingsFile().getFullPathName());
 
     ticksSinceSave = 0;
@@ -889,8 +970,13 @@ void MainComponent::updateReadout()
 
     String text, bigValue = "--.--";
     auto* device = deviceManager.getCurrentAudioDevice();
+    const auto simple = prefs.view == ViewMode::simple;
 
-    if (device == nullptr || ! latency.has_value())
+    if (simple)
+    {
+        text = describeSimple (latency, bigValue);
+    }
+    else if (device == nullptr || ! latency.has_value())
     {
         standingWarning.clear();
         text << ja ("オーディオデバイスが開いていません。\n左のパネルで入力・出力デバイスを選んでください。\n");
@@ -943,7 +1029,7 @@ void MainComponent::updateReadout()
     }
 
     // A bypassed slot is out of the path, so it counts 0 here like it does in the total above.
-    for (int i = 0; i < chain.size(); ++i)
+    for (int i = 0; i < chain.size() && ! simple; ++i)
         if (chain[i].isLive())
             text << "  " << (i + 1) << ". " << chain[i].description.name << " : "
                  << (chain[i].bypassed ? 0 : chain[i].node->getProcessor()->getLatencySamples()) << " samples"
@@ -961,11 +1047,66 @@ void MainComponent::updateReadout()
     }
 }
 
+// The simple view's readout: the number, and a line each for the biggest part, the health and what needs
+// attention. The words are decided in summarise().
+String MainComponent::describeSimple (const std::optional<Breakdown>& latency, String& bigValue)
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    SimpleInput input;
+    input.deviceOpen = device != nullptr && latency.has_value();
+
+    if (! input.deviceOpen)
+    {
+        standingWarning.clear();
+    }
+    else
+    {
+        const auto load = engine.callback.getLoad();
+        const auto rates = engine.getDeviceRates();
+
+        standingWarning = describeRateMismatch (device->getCurrentSampleRate(), rates.input, rates.output, rates.monitor);
+
+        input.latency = *latency;
+        input.overloads = engine.getOverloads();
+        input.lateCallbacks = load.late;
+        input.peakLoadPercent = load.maxPercent;
+        input.rateWarning = standingWarning;
+        input.monitorProblem = monitorNote();
+        input.heaviestPlugin = heaviestPlugin;
+        input.heaviestPercent = heaviestPercent;
+    }
+
+    const auto summary = summarise (input);
+
+    if (input.deviceOpen && device->getCurrentSampleRate() > 0)
+        bigValue = summary.total;
+
+    StringArray lines;
+
+    if (summary.totalNote.isNotEmpty())
+        lines.add (ja ("※ ") + summary.totalNote);
+
+    if (summary.largest.isNotEmpty())
+        lines.add (summary.largest);
+
+    lines.add (summary.health);
+
+    if (! input.deviceOpen)
+        lines.add (ja ("左のパネルで入力・出力デバイスを選んでください。"));
+
+    if (summary.warning.isNotEmpty())
+        lines.add (ja ("注意: ") + summary.warning);
+
+    return lines.joinIntoString ("\n");
+}
+
 std::optional<Breakdown> MainComponent::updateBreakdown()
 {
     std::optional<Breakdown> latency;
     ui::BreakdownView view;
     auto* device = deviceManager.getCurrentAudioDevice();
+    heaviestPlugin.clear();
+    heaviestPercent = 0.0;
     view.deviceOpen = device != nullptr;
 
     if (device != nullptr)
@@ -1011,7 +1152,11 @@ std::optional<Breakdown> MainComponent::updateBreakdown()
         }
 
         if (const auto heaviest = findHeaviest (stats); heaviest >= 0)
+        {
             view.loads[(size_t) heaviest].heaviest = true;
+            heaviestPlugin = view.loads[(size_t) heaviest].name;
+            heaviestPercent = view.loads[(size_t) heaviest].stats.maxPercent;
+        }
 
         view.latency = computeBreakdown (input);
         latency = view.latency;
@@ -1073,7 +1218,7 @@ void MainComponent::changeListenerCallback (ChangeBroadcaster*)
     chain.rewire();
     refreshMonitorControls();
 
-    if (const auto problem = engine.takeMonitorProblem(); problem.isNotEmpty())
+    if (const auto problem = takeMonitorProblem(); problem.isNotEmpty())
         showStatus (problem);
 
     persist();

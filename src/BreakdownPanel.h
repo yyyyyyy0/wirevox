@@ -47,6 +47,10 @@ public:
 
     void setView (const BreakdownView&);
 
+    // Compact: only the row with the measure button is left, for the simple view.
+    void setCompact (bool);
+    bool isCompact() const noexcept             { return compact; }
+
     // Height of the whole panel when nothing has to scroll.
     int getPreferredHeight (int width) const;
 
@@ -62,6 +66,7 @@ public:
 private:
     class Content;
 
+    bool compact = false;
     Label hint;
     Viewport viewport;
     std::unique_ptr<Content> content;

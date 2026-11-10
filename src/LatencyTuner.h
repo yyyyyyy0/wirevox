@@ -1,6 +1,8 @@
 #pragma once
 
+#include "BackgroundLoad.h"
 #include "Engine.h"
+#include "Modes.h"
 
 #include <functional>
 
@@ -25,7 +27,7 @@ public:
     explicit LatencyTuner (Engine&);
     ~LatencyTuner();
 
-    void start();
+    void start (TuneMode = TuneMode::fastest);
     void cancel();
     bool isRunning() const noexcept     { return phase != Phase::idle; }
 
@@ -38,6 +40,9 @@ public:
     // Replaces the engine as the source of the readings; for tests, which have no HAL to overload.
     void setReader (std::function<Reading()>);
 
+    // Replaces the synthetic load that the headroom mode runs; for tests, which must not burn CPU.
+    void setBackgroundLoad (std::unique_ptr<BackgroundLoad>);
+
     String getProgress() const;
     String getResult() const            { return result; }
 
@@ -46,6 +51,8 @@ public:
     static bool isClean (int overloads, int64 lateCallbacks, double maxLoadPercent, double allowedPercent);
 
     static constexpr int tickMs = 250;
+    static constexpr double fastestMaxLoadPercent = 85.0;
+    static constexpr double headroomMaxLoadPercent = 50.0;
 
 private:
     enum class Phase { idle, buffer, confirmBuffer, usage, confirmUsage };
@@ -56,6 +63,7 @@ private:
     void finish (const String& reason, Outcome);
     bool stepIsClean() const;
     bool deviceIsUnchanged() const;
+    double bufferLoadLimit() const noexcept;
 
     Engine& engine;
     Phase phase = Phase::idle;
@@ -70,6 +78,8 @@ private:
     MonitorPlan originalMonitor;
     bool monitorWasActive = false, monitorDropped = false;
     std::function<Reading()> reader;
+    TuneMode mode = TuneMode::fastest;
+    std::unique_ptr<BackgroundLoad> backgroundLoad;
 };
 
 } // namespace mfx

@@ -136,4 +136,73 @@ int declareMonitorPath (const Breakdown& breakdown, const hal::Numbers& monitorD
          + monitorDevice.outputSafety + monitorDevice.outputLatency + monitorDevice.outputStreamLatency;
 }
 
+namespace
+{
+    String plainName (const BreakdownRow& row, const String& pluginName)
+    {
+        switch (row.kind)
+        {
+            case RowKind::inputDevice:   return ja ("入力機器");
+            case RowKind::inputBuffer:   return ja ("入力バッファ");
+            case RowKind::plugin:        return ja ("プラグイン") + (pluginName.isNotEmpty() ? " " + pluginName : String());
+            case RowKind::outputBuffer:  return ja ("出力バッファ");
+            case RowKind::outputDevice:  return ja ("出力デバイス");
+            case RowKind::outputExcess:  return ja ("出力デバイスの超過分（実測）");
+        }
+
+        return {};
+    }
+
+    // The plugin's own name is what follows "プラグイン N: " in the row's label.
+    String pluginNameOf (const BreakdownRow& row)
+    {
+        auto name = row.label.fromFirstOccurrenceOf (": ", false, false);
+        const auto suffix = ja ("（バイパス中）");
+        return name.endsWith (suffix) ? name.dropLastCharacters (suffix.length()) : name;
+    }
+}
+
+SimpleView summarise (const SimpleInput& in)
+{
+    SimpleView view;
+    view.total = "--.--";
+
+    if (! in.deviceOpen)
+    {
+        view.health = ja ("デバイスが開いていません");
+        return view;
+    }
+
+    view.total = String (in.latency.totalMs, 2);
+
+    if (! in.latency.rows.empty() && ! in.latency.rows.back().known)
+        view.totalNote = ja ("超過分を除く");
+
+    if (in.latency.largest >= 0)
+    {
+        const auto& row = in.latency.rows[(size_t) in.latency.largest];
+        view.largest = ja ("いちばん大きいのは: ") + plainName (row, row.kind == RowKind::plugin ? pluginNameOf (row) : String())
+                     + ja ("（") + String (row.ms, 1) + " ms）";
+    }
+
+    const auto dropouts = (juce::int64) in.overloads + in.lateCallbacks;
+    view.stable = dropouts == 0;
+    view.health = (view.stable ? ja ("安定") : ja ("音切れ ") + String (dropouts) + ja (" 回"))
+                + ja ("  負荷の最大 ") + String (juce::roundToInt (in.peakLoadPercent)) + " %";
+
+    juce::StringArray warnings;
+
+    if (in.rateWarning.isNotEmpty())
+        warnings.add (in.rateWarning);
+
+    if (in.monitorProblem.isNotEmpty())
+        warnings.add (in.monitorProblem);
+
+    if (in.heaviestPlugin.isNotEmpty() && in.heaviestPercent >= heavyPluginPercent)
+        warnings.add (ja ("プラグイン ") + in.heaviestPlugin + ja (" が重めです（バッファ時間の ") + String (juce::roundToInt (in.heaviestPercent)) + ja (" %）"));
+
+    view.warning = warnings.joinIntoString ("  /  ");
+    return view;
+}
+
 } // namespace mfx

@@ -115,4 +115,35 @@ int declareMonitorPath (const Breakdown&, const hal::Numbers& monitorDevice, int
 // none is above zero.
 int findLargestRow (const std::vector<BreakdownRow>&);
 
+//==============================================================================
+// The simple view: the words for the few things it shows, decided here so they can be tested without a
+// window. `peakLoadPercent` and `heaviestPercent` are shares of one buffer (ProcessTime.h).
+struct SimpleInput
+{
+    bool deviceOpen = false;
+    Breakdown latency;
+    int overloads = 0;
+    juce::int64 lateCallbacks = 0;
+    double peakLoadPercent = 0.0;
+    juce::String rateWarning;               // describeRateMismatch(), empty when the rates agree
+    juce::String monitorProblem;            // why the monitor is waiting or off, empty when it is fine
+    juce::String heaviestPlugin;            // empty when no plugin has a reading
+    double heaviestPercent = 0.0;
+};
+
+struct SimpleView
+{
+    juce::String total;                     // the big number, "--.--" with no device
+    juce::String totalNote;                 // "超過分を除く" while the output device's excess is unknown
+    juce::String largest;                   // empty when there is nothing to name
+    juce::String health;                    // "安定" or "音切れ N 回", then the peak load
+    bool stable = true;
+    juce::String warning;                   // empty unless something needs attention
+};
+
+// A plugin that takes more than this share of a buffer in its worst block is worth a warning.
+constexpr double heavyPluginPercent = 70.0;
+
+SimpleView summarise (const SimpleInput&);
+
 } // namespace mfx

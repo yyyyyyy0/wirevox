@@ -16,7 +16,10 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <thread>
+#include <vector>
 
 namespace mfx
 {
@@ -303,6 +306,45 @@ namespace
         return result;
     }
 
+    // A BackgroundLoad that burns nothing and only records what the tuner asked of it.
+    struct LoadState
+    {
+        int starts = 0, stops = 0;
+        bool running = false;
+    };
+
+    class FakeLoad final : public BackgroundLoad
+    {
+    public:
+        explicit FakeLoad (std::shared_ptr<LoadState> s) : state (std::move (s)) {}
+
+        void start() override   { if (! state->running) { state->running = true; ++state->starts; } }
+        void stop() override    { if (state->running) { state->running = false; ++state->stops; } }
+
+    private:
+        std::shared_ptr<LoadState> state;
+    };
+
+    std::shared_ptr<LoadState> useFakeLoad (LatencyTuner& tuner)
+    {
+        auto state = std::make_shared<LoadState>();
+        tuner.setBackgroundLoad (std::make_unique<FakeLoad> (state));
+        return state;
+    }
+
+    // The callback of a plugin chain that needs `cost` buffer-samples of work: the share of the buffer it takes
+    // falls as the buffer grows. 64 samples are 62.5 %, which a quiet machine accepts and headroom does not.
+    void setReaderShareOfBuffer (LatencyTuner& tuner, Rig& rig, double cost, std::vector<std::optional<float>>* usagesSeen = nullptr)
+    {
+        tuner.setReader ([&rig, cost, usagesSeen]
+        {
+            if (usagesSeen != nullptr)
+                usagesSeen->push_back (rig.engine.getExperiments().ioCycleUsage);
+
+            return LatencyTuner::Reading { 0, 0, cost / (double) rig.runningBuffer() };
+        });
+    }
+
     void setReaderUncleanAtOrBelow (LatencyTuner& tuner, Rig& rig, int buffer)
     {
         tuner.setReader ([&rig, buffer]
@@ -534,6 +576,188 @@ int selfTestEngine()
         check (ended && ! tuner.isRunning() && ! rig.engine.isPersistedAudioHeld(), "a device switched under the run ends it");
         check (rig.engine.deviceManager.getAudioDeviceSetup().inputDeviceName == "FakeIn2", "the new device is left alone");
         check (rig.engine.getExperiments().ioCycleUsage == 0.5f, "only the cycle usage is put back");
+    }
+
+
+    //==========================================================================
+    // MIN LATENCY with headroom: a stricter limit under a background load, and the cycle usage left alone.
+    {
+        check (backgroundLoadWorkers (10) == 9 && backgroundLoadWorkers (2) == 1 && backgroundLoadWorkers (1) == 1 && backgroundLoadWorkers (0) == 1,
+               "the load uses the physical cores minus one, and at least one worker");
+        check (LatencyTuner::headroomMaxLoadPercent == 50.0 && LatencyTuner::fastestMaxLoadPercent == 85.0, "headroom allows 50 % of the buffer, the fastest search 85 %");
+    }
+
+    {
+        // The same machine (4000 buffer-samples of work per callback: 62.5 % of 64, 31 % of 128), searched both ways.
+        Rig quiet (settingsText (64));
+        LatencyTuner fastest (quiet.engine);
+        setReaderShareOfBuffer (fastest, quiet, 4000.0);
+        const auto fastestLoad = useFakeLoad (fastest);
+        fastest.start (TuneMode::fastest);
+        for (int guard = 0; guard < 5000 && fastest.isRunning(); ++guard)
+            fastest.tick();
+
+        Rig busy (settingsText (64));
+        LatencyTuner headroom (busy.engine);
+        setReaderShareOfBuffer (headroom, busy, 4000.0);
+        const auto headroomLoad = useFakeLoad (headroom);
+        headroom.start (TuneMode::headroom);
+        for (int guard = 0; guard < 5000 && headroom.isRunning(); ++guard)
+            headroom.tick();
+
+        check (quiet.runningBuffer() == 64 && fastest.getResult().startsWith (ja ("最小遅延（最速）")), "the fastest search keeps buffer 64 (" + fastest.getResult() + ")");
+        check (busy.runningBuffer() == 128 && headroom.getResult().startsWith (ja ("最小遅延（余裕あり）")), "headroom goes up to 128 for the same load (" + headroom.getResult() + ")");
+        check (busy.runningBuffer() >= quiet.runningBuffer(), "headroom never picks a smaller buffer than the fastest search");
+        check (headroom.getResult().contains (ja ("ゲーム")), "the result tells the user to try it with the game running");
+        check (fastestLoad->starts == 0 && headroomLoad->starts > 0, "the fastest search never runs the load, headroom does");
+        check (! busy.engine.isPersistedAudioHeld() && ! headroomLoad->running && headroomLoad->starts == headroomLoad->stops, "it is stopped when the run ends");
+    }
+
+    {
+        // Cycle usage: headroom resets a lowered one to the default and never sets one, in the run and in the result.
+        Rig rig (settingsText (64, "0.5"));
+        rig.persist();
+        const auto before = readFile();
+
+        LatencyTuner tuner (rig.engine);
+        std::vector<std::optional<float>> seen;
+        setReaderShareOfBuffer (tuner, rig, 700.0, &seen);
+        useFakeLoad (tuner);
+        tuner.start (TuneMode::headroom);
+        check (! rig.engine.getExperiments().ioCycleUsage.has_value(), "headroom starts from the device's default cycle usage, not the lowered 0.5");
+
+        int writes = 0;
+        bool differed = false;
+        const auto ended = tickToEnd (tuner, rig, before, writes, differed);
+        check (ended && ! differed, "all " + String (writes) + " settings written during the run equal the pre-run file");
+        check (! seen.empty() && std::all_of (seen.begin(), seen.end(), [] (const std::optional<float>& usage) { return ! usage.has_value(); }), "the cycle usage is the default at every reading");
+        check (rig.runningBuffer() == 16 && ! rig.engine.getExperiments().ioCycleUsage.has_value(), "it settles on the smallest clean buffer with the default cycle usage (" + tuner.getResult() + ")");
+        check (tuner.getResult().contains (ja ("サイクル使用率は既定のまま")), "the result says the cycle usage stays at the default");
+
+        rig.persist();
+        const auto disk = parseOnDisk();
+        check (disk.buffer == 16 && disk.cycleUsage.isEmpty(), "the lowered cycle usage is gone from the file: buffer " + String (disk.buffer) + ", cycleUsage '" + disk.cycleUsage + "'");
+
+        Rig relaunch (*loadSettings());
+        check (relaunch.runningBuffer() == 16 && ! relaunch.engine.getExperiments().ioCycleUsage.has_value(), "a relaunch runs buffer 16 at the default cycle usage");
+    }
+
+    {
+        // Where the load runs: not while the device is being reopened and settling, and always stopped at the end.
+        Rig rig (settingsText (64));
+        LatencyTuner tuner (rig.engine);
+        tuner.setReader ([] { return LatencyTuner::Reading {}; });
+        const auto load = useFakeLoad (tuner);
+        tuner.start (TuneMode::headroom);
+        check (! load->running && load->starts == 0, "the load is not started with the run, only after the device settled");
+        tuner.tick();
+        tuner.tick();
+        check (! load->running, "still settling after two ticks");
+        tuner.tick();
+        check (load->running && load->starts == 1, "it runs once the settle ticks are over");
+
+        for (int guard = 0; guard < 5000 && tuner.isRunning(); ++guard)
+            tuner.tick();
+
+        check (! tuner.isRunning() && ! load->running && load->starts > 1 && load->starts == load->stops, "stopped for every reopen and at the end: " + String (load->starts) + " starts, " + String (load->stops) + " stops");
+    }
+
+    {
+        // Every other way out of a run stops the load.
+        Rig rig (settingsText (64, "0.5"));
+        LatencyTuner tuner (rig.engine);
+        tuner.setReader ([] { return LatencyTuner::Reading {}; });
+        const auto load = useFakeLoad (tuner);
+        tuner.start (TuneMode::headroom);
+
+        for (int guard = 0; guard < 200 && ! load->running; ++guard)
+            tuner.tick();
+
+        check (load->running, "the load is running mid-run");
+        tuner.cancel();
+        check (! tuner.isRunning() && ! load->running && load->starts == load->stops, "cancel stops the load");
+        check (rig.engine.getExperiments().ioCycleUsage == 0.5f && rig.runningBuffer() == 64, "and puts the original cycle usage and buffer back");
+    }
+
+    {
+        Rig rig (settingsText (64));
+        LatencyTuner tuner (rig.engine);
+        tuner.setReader ([] { return LatencyTuner::Reading {}; });
+        const auto load = useFakeLoad (tuner);
+        tuner.start (TuneMode::headroom);
+
+        for (int guard = 0; guard < 200 && ! load->running; ++guard)
+            tuner.tick();
+
+        auto setup = rig.engine.deviceManager.getAudioDeviceSetup();
+        setup.inputDeviceName = "FakeIn2";
+        rig.engine.deviceManager.setAudioDeviceSetup (setup, true);
+
+        check (load->running, "the load is running when the device is switched");
+        const auto ended = tuner.tick();
+        check (ended && ! tuner.isRunning() && ! load->running, "a device switched under the run (abandon) stops the load");
+    }
+
+    {
+        Rig rig (settingsText (64));
+        rig.world.refusedBuffers = { 128 };
+        LatencyTuner tuner (rig.engine);
+        setReaderShareOfBuffer (tuner, rig, 4000.0);
+        const auto load = useFakeLoad (tuner);
+        tuner.start (TuneMode::headroom);
+
+        for (int guard = 0; guard < 5000 && tuner.isRunning(); ++guard)
+            tuner.tick();
+
+        check (! tuner.isRunning() && ! load->running && load->starts == load->stops && load->starts > 0, "a step that cannot be opened stops the load (" + tuner.getResult() + ")");
+        check (rig.runningBuffer() == 64, "and the original buffer is back");
+    }
+
+    {
+        Rig rig (settingsText (64));
+        const auto load = std::make_shared<LoadState>();
+
+        {
+            LatencyTuner tuner (rig.engine);
+            tuner.setReader ([] { return LatencyTuner::Reading {}; });
+            tuner.setBackgroundLoad (std::make_unique<FakeLoad> (load));
+            tuner.start (TuneMode::headroom);
+
+            for (int guard = 0; guard < 200 && ! load->running; ++guard)
+                tuner.tick();
+
+            check (load->running, "the load is running when the tuner goes out of scope");
+        }
+
+        check (! load->running, "destroying the tuner stops the load");
+    }
+
+    {
+        // Not stable at any size: the run restores, and the load is stopped.
+        Rig rig (settingsText (64));
+        LatencyTuner tuner (rig.engine);
+        tuner.setReader ([] { return LatencyTuner::Reading { 1, 0, 0.0 }; });
+        const auto load = useFakeLoad (tuner);
+        tuner.start (TuneMode::headroom);
+
+        for (int guard = 0; guard < 5000 && tuner.isRunning(); ++guard)
+            tuner.tick();
+
+        check (! tuner.isRunning() && ! load->running && rig.runningBuffer() == 64, "a run that finds nothing stable stops the load and restores");
+    }
+
+    {
+        // The real load: starts, runs on its own threads, joins on stop, and is safe to stop twice or never start.
+        auto load = makeThreadedBackgroundLoad();
+        load->stop();
+        load->start();
+        load->start();
+        Thread::sleep (30);
+        load->stop();
+        load->stop();
+        load->start();
+        load.reset();
+        check (true, "the threaded load starts, stops, restarts and is destroyed while running");
     }
 
     //==========================================================================
@@ -1169,6 +1393,116 @@ int selfTestBreakdown()
             measure::Session none (rig.engine, {});
             check (! none.start() && none.getResult().problem == "no audio device is open", "and not without any device");
         }
+    }
+
+
+    //==========================================================================
+    // The simple view's words, and the two preferences.
+    {
+        BreakdownInput in;
+        in.sampleRate = 44100.0;
+        in.aggregate = numbers;
+        in.aggregate.outputLatency = 700;       // 15.9 ms, the biggest part
+        in.plugins = { { 0, "TDR Nova", 40, false } };
+        const auto latency = computeBreakdown (in);
+
+        SimpleInput base;
+        base.deviceOpen = true;
+        base.latency = latency;
+        base.peakLoadPercent = 41.6;
+
+        const auto quiet = summarise (base);
+        check (quiet.total == String (latency.totalMs, 2) && quiet.stable, "the number is the breakdown's total and a clean run is stable");
+        check (quiet.largest == ja ("いちばん大きいのは: 出力デバイス（") + String (latency.rows[(size_t) latency.largest].ms, 1) + " ms）", "the biggest part in plain words: " + quiet.largest);
+        check (quiet.health == ja ("安定  負荷の最大 42 %"), "stable, with the peak load: " + quiet.health);
+        check (quiet.warning.isEmpty(), "nothing to warn about gives no warning line");
+        check (quiet.totalNote == ja ("超過分を除く"), "an unmeasured excess is said to be left out of the number");
+
+        auto measured = in;
+        measured.excessMs = 17.4;
+        auto withExcess = base;
+        withExcess.latency = computeBreakdown (measured);
+        const auto known = summarise (withExcess);
+        check (known.totalNote.isEmpty() && known.total == String (withExcess.latency.totalMs, 2), "a measured excess is in the number and there is no hint");
+        check (known.largest.contains (ja ("出力デバイスの超過分（実測）")) && known.largest.contains ("17.4 ms"), "the measured excess can be the biggest part: " + known.largest);
+
+        auto plugin = in;
+        plugin.plugins = { { 0, "RX 11", 4096, false } };
+        auto withPlugin = base;
+        withPlugin.latency = computeBreakdown (plugin);
+        check (summarise (withPlugin).largest.startsWith (ja ("いちばん大きいのは: プラグイン RX 11（")), "a plugin is named: " + summarise (withPlugin).largest);
+
+        auto bypassed = in;
+        bypassed.plugins = { { 0, "RX 11", 4096, true } };
+        auto withBypassed = base;
+        withBypassed.latency = computeBreakdown (bypassed);
+        check (! summarise (withBypassed).largest.contains (ja ("バイパス")), "a bypassed plugin's name has no suffix");
+
+        auto dropouts = base;
+        dropouts.overloads = 2;
+        dropouts.lateCallbacks = 3;
+        const auto bad = summarise (dropouts);
+        check (! bad.stable && bad.health == ja ("音切れ 5 回  負荷の最大 42 %"), "overloads and late callbacks add up to the dropouts: " + bad.health);
+
+        auto late = base;
+        late.lateCallbacks = 1;
+        check (summarise (late).health.startsWith (ja ("音切れ 1 回")), "a late callback alone is a dropout");
+
+        auto rate = base;
+        rate.rateWarning = "rate warning";
+        auto monitor = base;
+        monitor.monitorProblem = "monitor waiting";
+        auto heavy = base;
+        heavy.heaviestPlugin = "TDR Nova";
+        heavy.heaviestPercent = 70.0;
+        auto light = base;
+        light.heaviestPlugin = "TDR Nova";
+        light.heaviestPercent = 69.0;
+        check (summarise (rate).warning == "rate warning", "a rate mismatch is a warning");
+        check (summarise (monitor).warning == "monitor waiting", "a waiting or failed monitor is a warning");
+        check (summarise (heavy).warning.contains ("TDR Nova") && summarise (heavy).warning.contains ("70 %"), "a plugin at 70 % of the buffer is a warning: " + summarise (heavy).warning);
+        check (summarise (light).warning.isEmpty(), "and one at 69 % is not");
+
+        auto all = heavy;
+        all.rateWarning = "rate warning";
+        all.monitorProblem = "monitor waiting";
+        const auto joined = summarise (all).warning;
+        check (joined.contains ("rate warning") && joined.contains ("monitor waiting") && joined.contains ("TDR Nova") && ! joined.contains ("\n"), "several warnings share one line");
+
+        SimpleInput none;
+        none.rateWarning = "stale";
+        const auto closed = summarise (none);
+        check (closed.total == "--.--" && closed.largest.isEmpty() && closed.warning.isEmpty() && closed.totalNote.isEmpty() && closed.health.isNotEmpty(),
+              "with no device open: no number, nothing named, no warning, and a line that says so: " + closed.health);
+
+        SimpleInput silent;
+        silent.deviceOpen = true;
+        silent.latency = computeBreakdown ({});
+        check (summarise (silent).largest.isEmpty(), "when every part is 0 nothing is named");
+    }
+
+    {
+        XmlElement none ("MIC_FX_HOST");
+        check (readTuneMode (none) == TuneMode::headroom && readViewMode (none) == ViewMode::detail,
+               "a settings file without the attributes reads as headroom and, for an existing user, the detail view");
+        none.setAttribute ("tuneMode", "bogus");
+        none.setAttribute ("view", "bogus");
+        check (readTuneMode (none) == TuneMode::headroom && readViewMode (none) == ViewMode::detail, "unknown values read as headroom and detail");
+
+        XmlElement written ("MIC_FX_HOST");
+        writePreferences (written, { TuneMode::fastest, ViewMode::detail });
+        check (written.getStringAttribute ("tuneMode") == "fastest" && written.getStringAttribute ("view") == "detail"
+                   && readTuneMode (written) == TuneMode::fastest && readViewMode (written) == ViewMode::detail, "fastest and detail round-trip");
+        writePreferences (written, { TuneMode::headroom, ViewMode::simple });
+        check (readTuneMode (written) == TuneMode::headroom && readViewMode (written) == ViewMode::simple, "headroom and simple round-trip");
+
+        check (Preferences{}.tune == TuneMode::headroom && Preferences{}.view == ViewMode::simple, "a first run starts with headroom and the simple view");
+
+        Rig rig (settingsText (64));
+        const auto saved = buildSettingsXml ("rack84", rig.engine, { TuneMode::fastest, ViewMode::detail });
+        check (readTuneMode (*saved) == TuneMode::fastest && readViewMode (*saved) == ViewMode::detail, "the settings document carries the preferences");
+        const auto defaults = buildSettingsXml ("rack84", rig.engine);
+        check (readTuneMode (*defaults) == TuneMode::headroom && readViewMode (*defaults) == ViewMode::simple, "and the defaults when none are given");
     }
 
     useSettingsFile ({});

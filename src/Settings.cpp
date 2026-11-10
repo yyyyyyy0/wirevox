@@ -119,6 +119,22 @@ void writeThemeId (XmlElement& root, const String& id)
     root.setAttribute ("theme", id);
 }
 
+TuneMode readTuneMode (const XmlElement& root)
+{
+    return root.getStringAttribute ("tuneMode") == "fastest" ? TuneMode::fastest : TuneMode::headroom;
+}
+
+ViewMode readViewMode (const XmlElement& root)
+{
+    return root.getStringAttribute ("view") == "simple" ? ViewMode::simple : ViewMode::detail;
+}
+
+void writePreferences (XmlElement& root, const Preferences& preferences)
+{
+    root.setAttribute ("tuneMode", preferences.tune == TuneMode::fastest ? "fastest" : "headroom");
+    root.setAttribute ("view", preferences.view == ViewMode::simple ? "simple" : "detail");
+}
+
 std::optional<ExcessRecord> readExcess (const XmlElement& root)
 {
     const auto* element = root.getChildByName ("LATENCY_EXCESS");
@@ -178,10 +194,11 @@ void writeMonitor (XmlElement& root, const MonitorPlan& plan)
     element->setAttribute ("firstChannel", plan.firstChannel);
 }
 
-std::unique_ptr<XmlElement> buildSettingsXml (const String& themeId, const Engine& engine)
+std::unique_ptr<XmlElement> buildSettingsXml (const String& themeId, const Engine& engine, const Preferences& preferences)
 {
     auto root = std::make_unique<XmlElement> ("MIC_FX_HOST");
     writeThemeId (*root, themeId);
+    writePreferences (*root, preferences);
 
     auto audio = engine.getPersistedAudio();
 

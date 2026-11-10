@@ -365,7 +365,17 @@ void BreakdownPanel::setView (const BreakdownView& view)
 
 int BreakdownPanel::getPreferredHeight (int) const
 {
-    return topRowHeight + content->getPreferredHeight();
+    return topRowHeight + (compact ? 0 : content->getPreferredHeight());
+}
+
+void BreakdownPanel::setCompact (bool shouldBeCompact)
+{
+    if (compact == shouldBeCompact)
+        return;
+
+    compact = shouldBeCompact;
+    viewport.setVisible (! compact);
+    resized();
 }
 
 void BreakdownPanel::setMeasuring (bool running, bool allowed)
