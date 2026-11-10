@@ -386,7 +386,17 @@ OSStatus Capture::ioProc (AudioObjectID, const AudioTimeStamp* now, const AudioB
 
 int Capture::findBuffer (int64_t sample) const
 {
-    const auto n = numBuffers();
+    return hal::findBuffer (bufferSpan(), sample);
+}
+
+double Capture::timeOfSampleNs (double sample, double sampleRate) const
+{
+    return hal::timeOfSampleNs (bufferSpan(), sample, sampleRate);
+}
+
+int findBuffer (Span<const Capture::Buffer> buffers, int64_t sample)
+{
+    const auto n = (size_t) buffers.size();
     size_t low = 0, high = n;
 
     while (low < high)
@@ -402,9 +412,9 @@ int Capture::findBuffer (int64_t sample) const
     return low < n && buffers[low].firstSample <= sample ? (int) low : -1;
 }
 
-double Capture::timeOfSampleNs (double sample, double sampleRate) const
+double timeOfSampleNs (Span<const Capture::Buffer> buffers, double sample, double sampleRate)
 {
-    const auto index = findBuffer ((int64_t) std::floor (sample));
+    const auto index = findBuffer (buffers, (int64_t) std::floor (sample));
 
     if (index < 0)
         return -1.0;

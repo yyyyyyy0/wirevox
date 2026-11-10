@@ -41,6 +41,30 @@ struct Result
     int trustworthyRuns = 0;
 };
 
+// Everything the analysis of one burst reads, as plain data, so the timing arithmetic can be run on
+// made-up timestamps. `tap` and `buffers` are in recording order.
+struct BurstInputs
+{
+    Span<const hal::TimestampTap::Entry> tap;       // input and output HAL time of every cycle of the host
+    Span<const hal::Capture::Buffer> buffers;       // HAL time of every buffer of the recording
+    std::vector<const float*> channels;
+    int numSamples = 0;
+    const float* burst = nullptr;
+    int burstLength = 0;
+    double sampleRate = 0.0;
+    double chainNs = 0.0;           // plugin latency, added to the output time the host cycle declares
+    double readerFloorNs = 0.0;     // the recording side's own latency and safety offset
+};
+
+// Index of the tap entry whose output time is `outputHostNs` (what JUCE passed to the callback that
+// started the burst), or -1. Cycles are at least 0.3 ms apart, so the 100 us tolerance cannot match
+// a neighbour.
+int findCycle (Span<const hal::TimestampTap::Entry> tap, double outputHostNs);
+
+// Analyses the burst that was injected in the cycle whose output time was `outputHostNs`. A run that
+// could not be found or analysed has coefficient 0 and is not trustworthy.
+Run analyseBurst (const BurstInputs&, uint64_t outputHostNs);
+
 // Injects the test burst into the graph input `options.runs` times, records what arrives on the
 // output device's input side, and works out the delay of every burst. Message thread only; spins the
 // message loop while it waits.

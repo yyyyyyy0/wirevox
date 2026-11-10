@@ -37,6 +37,7 @@ void HostCallback::audioDeviceAboutToStart (AudioIODevice* device)
     lastStartTicks = 0;
     callbackCounter = 0;
     burstPosition = -1;
+    seenEpoch = injectionEpoch.load();
     burst = measure::makeTestSignal (rate);
 
     scratch.setSize (jmax (1, device->getActiveInputChannels().countNumberOfSetBits()), jmax (1, block));
@@ -45,7 +46,6 @@ void HostCallback::audioDeviceAboutToStart (AudioIODevice* device)
     for (int c = 0; c < scratch.getNumChannels(); ++c)
         scratchPointers[(size_t) c] = scratch.getReadPointer (c);
 
-    currentRate = rate;
     lastBlockSize = block;
     resetLoad();
     ++startCount;
@@ -89,6 +89,8 @@ HostCallback::Load HostCallback::getLoad() const
 void HostCallback::setInjecting (bool shouldInject) noexcept
 {
     armed = false;
+    disturbed = false;
+    ++injectionEpoch;
     injecting = shouldInject;
 }
 
@@ -96,9 +98,28 @@ void HostCallback::setInjecting (bool shouldInject) noexcept
 const float* const* HostCallback::applyInjection (const float* const* input, int numInputs, int numSamples,
                                                   const AudioIODeviceCallbackContext& context)
 {
-    if (! injecting.load (std::memory_order_acquire) || numInputs <= 0 || numInputs > scratch.getNumChannels()
-        || numSamples > scratch.getNumSamples() || burst.empty())
+    if (const auto epoch = injectionEpoch.load (std::memory_order_acquire); epoch != seenEpoch)
+    {
+        seenEpoch = epoch;
+        burstPosition = -1;
+    }
+
+    if (! injecting.load (std::memory_order_acquire))
         return input;
+
+    // The live microphone must never reach the output during a measurement, so a block the scratch
+    // buffer cannot hold is dropped instead of passed through.
+    if (numInputs > scratch.getNumChannels() || numSamples > scratch.getNumSamples() || burst.empty())
+    {
+        disturbed.store (true, std::memory_order_release);
+        return nullptr;
+    }
+
+    if (numInputs <= 0)
+    {
+        disturbed.store (true, std::memory_order_release);
+        return input;
+    }
 
     if (burstPosition < 0 && armed.exchange (false))
     {
@@ -148,7 +169,17 @@ void HostCallback::audioDeviceIOCallbackWithContext (const float* const* input, 
     lastBlockSize.store (numSamples, std::memory_order_relaxed);
 
     const auto* usedInput = applyInjection (input, numInputs, numSamples, context);
-    player.audioDeviceIOCallbackWithContext (usedInput, numInputs, output, numOutputs, numSamples, context);
+
+    if (usedInput == nullptr && numInputs > 0)
+    {
+        for (int c = 0; c < numOutputs; ++c)
+            if (output[c] != nullptr)
+                FloatVectorOperations::clear (output[c], numSamples);
+    }
+    else
+    {
+        player.audioDeviceIOCallbackWithContext (usedInput, numInputs, output, numOutputs, numSamples, context);
+    }
 
     const auto busy = (int64) ticksToNs (mach_absolute_time() - start);
     callbacks.fetch_add (1, std::memory_order_relaxed);

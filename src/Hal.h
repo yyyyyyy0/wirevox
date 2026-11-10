@@ -53,7 +53,6 @@ public:
 
     int getCount() const noexcept { return count.load(); }
     void reset() noexcept { count = 0; }
-    const std::vector<AudioObjectID>& getDevices() const noexcept { return watched; }
 
 private:
     static OSStatus notify (AudioObjectID, UInt32, const AudioObjectPropertyAddress*, void*);
@@ -79,6 +78,7 @@ public:
 
     size_t size() const noexcept { return std::min (written.load(), entries.size()); }
     const Entry& operator[] (size_t i) const noexcept { return entries[i]; }
+    juce::Span<const Entry> span() const noexcept { return { entries.data(), size() }; }
 
 private:
     static OSStatus ioProc (AudioObjectID, const AudioTimeStamp*, const AudioBufferList*, const AudioTimeStamp*,
@@ -117,6 +117,8 @@ public:
     const Buffer& buffer (size_t i) const noexcept { return buffers[i]; }
     int64_t gaps() const noexcept { return discontinuities.load(); }
 
+    juce::Span<const Buffer> bufferSpan() const noexcept { return { buffers.data(), numBuffers() }; }
+
     // Index of the buffer that holds `sample`, or -1.
     int findBuffer (int64_t sample) const;
 
@@ -140,5 +142,10 @@ private:
     int lastFrames = 0;
     bool running = false;
 };
+
+// The same lookups on any run of buffers in recording order, so the timing arithmetic can be tested
+// with made-up timestamps.
+int findBuffer (juce::Span<const Capture::Buffer> buffers, int64_t sample);
+double timeOfSampleNs (juce::Span<const Capture::Buffer> buffers, double sample, double sampleRate);
 
 } // namespace mfx::hal

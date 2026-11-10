@@ -47,17 +47,67 @@ namespace
 {
     constexpr double searchBeforeMs = 20.0, searchAfterMs = 470.0;
     constexpr double matchToleranceNs = 100000.0;
+}
 
-    // Index of the tap entry whose output time is the one JUCE passed to the callback that started
-    // the burst, or -1. Cycles are at least 0.3 ms apart, so 100 us cannot match the wrong one.
-    int findCycle (const hal::TimestampTap& tap, double outputNs)
+int findCycle (Span<const hal::TimestampTap::Entry> tap, double outputHostNs)
+{
+    for (size_t i = 0; i < (size_t) tap.size(); ++i)
+        if (std::abs (hal::hostTicksToNs (tap[i].outputTicks) - outputHostNs) < matchToleranceNs)
+            return (int) i;
+
+    return -1;
+}
+
+Run analyseBurst (const BurstInputs& in, uint64_t outputHostNs)
+{
+    Run run;
+    const auto cycle = findCycle (in.tap, (double) outputHostNs);
+
+    if (cycle < 0)
+        return run;
+
+    // The burst's first sample is the first sample of the input buffer of this cycle.
+    const auto inputNs = hal::hostTicksToNs (in.tap[(size_t) cycle].inputTicks);
+    const auto outputNs = hal::hostTicksToNs (in.tap[(size_t) cycle].outputTicks) + in.chainNs;
+
+    int firstBuffer = -1;
+
+    for (size_t b = 0; b < (size_t) in.buffers.size(); ++b)
+        if (hal::hostTicksToNs (in.buffers[b].inputTicks) >= inputNs - searchBeforeMs * 1.0e6)
+        {
+            firstBuffer = (int) b;
+            break;
+        }
+
+    if (firstBuffer < 0)
+        return run;
+
+    const auto from = (int) in.buffers[(size_t) firstBuffer].firstSample;
+    const auto to = from + (int) (in.sampleRate * (searchBeforeMs + searchAfterMs) / 1000.0);
+
+    DelayEstimate best;
+
+    for (auto* channel : in.channels)
     {
-        for (size_t i = 0; i < tap.size(); ++i)
-            if (std::abs (hal::hostTicksToNs (tap[i].outputTicks) - outputNs) < matchToleranceNs)
-                return (int) i;
+        const auto estimate = estimateDelay (in.burst, in.burstLength, channel, in.numSamples, from, to);
 
-        return -1;
+        if (estimate.valid && (! best.valid || estimate.coefficient > best.coefficient))
+            best = estimate;
     }
+
+    const auto arrivalNs = best.valid ? hal::timeOfSampleNs (in.buffers, best.delaySamples, in.sampleRate) : -1.0;
+
+    if (arrivalNs > 0.0)
+    {
+        run.trustworthy = isTrustworthy (best);
+        run.latencyMs = (arrivalNs + in.readerFloorNs - inputNs) / 1.0e6;
+        run.declaredMs = (outputNs - inputNs) / 1.0e6;
+        run.excessMs = run.latencyMs - run.declaredMs;
+        run.coefficient = best.coefficient;
+        run.sidelobeDb = best.sidelobeDb;
+    }
+
+    return run;
 }
 
 Result runSession (Engine& engine, const Options& options)
@@ -101,8 +151,28 @@ Result runSession (Engine& engine, const Options& options)
         return r;
     }
 
-    if (options.captureBuffer > 0)
-        hal::setBufferSize (captureId, options.captureBuffer);
+    // Proof tool: the capture device keeps the requested IO buffer only while this function runs.
+    struct CaptureBufferScope
+    {
+        CaptureBufferScope (AudioObjectID idIn, int previousIn, int requested)
+            : id (idIn), previous (previousIn), active (requested > 0)
+        {
+            if (active)
+                hal::setBufferSize (id, requested);
+        }
+
+        ~CaptureBufferScope()
+        {
+            if (active)
+                hal::setBufferSize (id, previous);
+        }
+
+        AudioObjectID id;
+        int previous;
+        bool active;
+    };
+
+    const CaptureBufferScope captureBufferScope (captureId, r.capture.bufferSize, options.captureBuffer);
 
     r.chainLatencySamples = options.withChain ? engine.chain.getGraph().getLatencySamples() : 0;
     engine.chain.setForceBypassAll (! options.withChain);
@@ -123,6 +193,7 @@ Result runSession (Engine& engine, const Options& options)
     engine.callback.resetLoad();
 
     const auto started = capture.start() && tap.start();
+    bool disturbed = false;
 
     if (started)
     {
@@ -136,6 +207,7 @@ Result runSession (Engine& engine, const Options& options)
         }
 
         wait (200);
+        disturbed = engine.callback.injectionWasDisturbed();
         engine.callback.setInjecting (false);
     }
 
@@ -144,9 +216,6 @@ Result runSession (Engine& engine, const Options& options)
     engine.chain.setForceBypassAll (false);
 
     r.captureBufferUsed = hal::readNumbers (captureId).bufferSize;
-
-    if (options.captureBuffer > 0)
-        hal::setBufferSize (captureId, r.capture.bufferSize);
 
     if (! started)
     {
@@ -158,6 +227,13 @@ Result runSession (Engine& engine, const Options& options)
     r.load = engine.callback.getLoad();
     r.captureGaps = capture.gaps();
 
+    if (disturbed)
+    {
+        r.problem = "a block arrived that the injection buffer could not hold (the device's channels or block size changed); "
+                    "that block was played as silence and the run is invalid";
+        return r;
+    }
+
     std::vector<double> wake;
 
     for (size_t i = 0; i < tap.size(); i += 4)
@@ -167,67 +243,23 @@ Result runSession (Engine& engine, const Options& options)
 
     const auto& burst = engine.callback.getBurst();
     const auto rate = r.sampleRate;
-    const auto chainNs = 1.0e9 * r.chainLatencySamples / rate;
-    const auto readerFloorNs = 1.0e9 * (r.capture.inputLatency + r.capture.inputSafety + r.capture.inputStreamLatency) / rate;
+
+    BurstInputs inputs;
+    inputs.tap = tap.span();
+    inputs.buffers = capture.bufferSpan();
+
+    for (int c = 0; c < capture.numChannels(); ++c)
+        inputs.channels.push_back (capture.data (c));
+
+    inputs.numSamples = (int) capture.numSamples();
+    inputs.burst = burst.data();
+    inputs.burstLength = (int) burst.size();
+    inputs.sampleRate = rate;
+    inputs.chainNs = 1.0e9 * r.chainLatencySamples / rate;
+    inputs.readerFloorNs = 1.0e9 * (r.capture.inputLatency + r.capture.inputSafety + r.capture.inputStreamLatency) / rate;
 
     for (int i = 0; i < engine.callback.numInjections(); ++i)
-    {
-        Run run;
-        const auto injection = engine.callback.getInjection (i);
-        const auto cycle = findCycle (tap, (double) injection.outputHostNs);
-
-        if (cycle < 0)
-        {
-            r.runs.push_back (run);
-            continue;
-        }
-
-        // The burst's first sample is the first sample of the input buffer of this cycle.
-        const auto inputNs = hal::hostTicksToNs (tap[(size_t) cycle].inputTicks);
-        const auto outputNs = hal::hostTicksToNs (tap[(size_t) cycle].outputTicks) + chainNs;
-
-        int firstBuffer = -1;
-
-        for (size_t b = 0; b < capture.numBuffers(); ++b)
-            if (hal::hostTicksToNs (capture.buffer (b).inputTicks) >= inputNs - searchBeforeMs * 1.0e6)
-            {
-                firstBuffer = (int) b;
-                break;
-            }
-
-        if (firstBuffer < 0)
-        {
-            r.runs.push_back (run);
-            continue;
-        }
-
-        const auto from = (int) capture.buffer ((size_t) firstBuffer).firstSample;
-        const auto to = from + (int) (rate * (searchBeforeMs + searchAfterMs) / 1000.0);
-
-        DelayEstimate best;
-
-        for (int c = 0; c < capture.numChannels(); ++c)
-        {
-            const auto estimate = estimateDelay (burst.data(), (int) burst.size(), capture.data (c), (int) capture.numSamples(), from, to);
-
-            if (estimate.valid && (! best.valid || estimate.coefficient > best.coefficient))
-                best = estimate;
-        }
-
-        const auto arrivalNs = best.valid ? capture.timeOfSampleNs (best.delaySamples, rate) : -1.0;
-
-        if (arrivalNs > 0.0)
-        {
-            run.trustworthy = isTrustworthy (best);
-            run.latencyMs = (arrivalNs + readerFloorNs - inputNs) / 1.0e6;
-            run.declaredMs = (outputNs - inputNs) / 1.0e6;
-            run.excessMs = run.latencyMs - run.declaredMs;
-            run.coefficient = best.coefficient;
-            run.sidelobeDb = best.sidelobeDb;
-        }
-
-        r.runs.push_back (run);
-    }
+        r.runs.push_back (analyseBurst (inputs, engine.callback.getInjection (i).outputHostNs));
 
     std::vector<double> latency, declared, excess;
 
