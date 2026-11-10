@@ -216,6 +216,14 @@ namespace
                      + " samples (callback receives " + String (s.engine.callback.getBlockSize()) + ")");
         describeNumbers (report, "aggregate (JUCE private)", s.engine.getAggregateNumbers());
 
+        // The window's breakdown adds up the same numbers; at cycle usage 1.0 this is the `declared` span below.
+        const auto host = declareHost (s.engine.getAggregateNumbers(), s.engine.getCycleUsage());
+        const auto rate = device->getCurrentSampleRate();
+        report.line ("HAL numbers declare " + String (host.total()) + " samples = " + fixed (samplesToMs (host.total(), rate))
+                     + " ms for the host (input device " + String (host.inputDevice) + " + input buffer " + String (host.inputBuffer)
+                     + " + output buffer " + String (host.outputBuffer) + " + output safety " + String (host.outputSafety)
+                     + " + output device " + String (host.outputDevice) + ")");
+
         const auto rates = s.engine.getDeviceRates();
         const auto mismatch = describeRateMismatch (device->getCurrentSampleRate(), rates.input, rates.output);
         report.line ("device rates after opening: input " + String (rates.input, 0) + " Hz, output " + String (rates.output, 0) + " Hz"

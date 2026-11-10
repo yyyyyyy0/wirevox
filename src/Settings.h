@@ -1,6 +1,9 @@
 #pragma once
 
+#include "Breakdown.h"
+
 #include <juce_core/juce_core.h>
+#include <optional>
 
 namespace mfx
 {
@@ -32,8 +35,14 @@ juce::File getSettingsFile();
 juce::String readThemeId (const juce::XmlElement& root);
 void writeThemeId (juce::XmlElement& root, const juce::String& id);
 
+// The measured excess of the output device is a LATENCY_EXCESS child of the root with the device name
+// and rate it was taken at and when. Settings files from before it existed have none, which reads as
+// not measured; a damaged one reads the same.
+std::optional<ExcessRecord> readExcess (const juce::XmlElement& root);
+void writeExcess (juce::XmlElement& root, const ExcessRecord&);
+
 // The whole document the app writes: theme, the audio settings the engine says are persistable
-// (see Engine::getPersistedAudio) and the chain.
+// (see Engine::getPersistedAudio), the measured excess that still applies to the open device, and the chain.
 std::unique_ptr<juce::XmlElement> buildSettingsXml (const juce::String& themeId, const Engine&);
 
 std::unique_ptr<juce::XmlElement> loadSettings();

@@ -49,6 +49,8 @@ juce_add_gui_app(MicFxHost
 target_sources(MicFxHost PRIVATE
     src/Main.cpp
     src/Chain.cpp
+    src/ProcessTime.cpp
+    src/Breakdown.cpp
     src/Settings.cpp
     src/CommandLine.cpp
     src/Correlate.cpp
@@ -107,3 +109,5 @@ add_test(NAME "${MFX_PRODUCT_NAME} hard bypass" COMMAND MicFxHost --selftest-cha
 add_test(NAME "${MFX_PRODUCT_NAME} sweep choice" COMMAND MicFxHost --selftest-sweep)
 add_test(NAME "${MFX_PRODUCT_NAME} latency timing and burst injection" COMMAND MicFxHost --selftest-timing)
 add_test(NAME "${MFX_PRODUCT_NAME} engine persistence, MIN LATENCY and restore" COMMAND MicFxHost --selftest-engine)
+add_test(NAME "${MFX_PRODUCT_NAME} latency breakdown and saved excess" COMMAND MicFxHost --selftest-breakdown)
+add_test(NAME "${MFX_PRODUCT_NAME} per-plugin processing time" COMMAND MicFxHost --selftest-processtime)

@@ -3,6 +3,10 @@
 #include "Correlate.h"
 #include "Engine.h"
 
+#include <atomic>
+#include <memory>
+#include <thread>
+
 namespace mfx::measure
 {
 
@@ -25,7 +29,8 @@ struct Run
 
 struct Result
 {
-    String problem;             // non-empty when nothing could be measured
+    String problem;             // non-empty when nothing could be measured (English, for the command line)
+    String problemJa;           // the same sentence for the window
     std::vector<Run> runs;
     double sampleRate = 0.0;
     int blockSize = 0;
@@ -65,10 +70,74 @@ int findCycle (Span<const hal::TimestampTap::Entry> tap, double outputHostNs);
 // could not be found or analysed has coefficient 0 and is not trustworthy.
 Run analyseBurst (const BurstInputs&, uint64_t outputHostNs);
 
-// Injects the test burst into the graph input `options.runs` times, records what arrives on the
-// output device's input side, and works out the delay of every burst. Message thread only; spins the
-// message loop while it waits.
+// One measurement: injects the test burst into the graph input `options.runs` times, records what
+// arrives on the output device's input side, and works out the delay of every burst.
+//
+// It is driven by a timer on the message thread, the way LatencyTuner is: start(), then tick() every
+// `tickMs` until it returns true. Nothing blocks the message loop; the correlation of the recording
+// (some 100 ms of FFT work) runs on a worker thread. While it runs the chain is taken out of the path
+// (unless `withChain`), the microphone is replaced by the burst, and everything it changed is put back
+// by a ScopedSetup however it ends: finished, failed, cancelled or destroyed.
+class Session
+{
+public:
+    Session (Engine&, const Options&);
+    ~Session();
+
+    // False when it could not begin; the result then says why and nothing was changed.
+    bool start();
+    bool isRunning() const noexcept     { return phase != Phase::idle; }
+
+    // True when this call ended the run, whatever the outcome.
+    bool tick();
+    void cancel();
+
+    // Complete once isRunning() is false again; it is not to be read while the worker thread runs.
+    const Result& getResult() const noexcept { return result; }
+    String getProgress() const;
+
+    static constexpr int tickMs = 250;
+
+private:
+    enum class Phase { idle, recording, analysing };
+    struct CaptureBufferScope;
+
+    bool fail (const String& english, const String& japanese);
+    bool deviceIsUnchanged() const;
+    void stopRecording();
+    void analyse();
+    void releaseEverything();
+
+    Engine& engine;
+    Options options;
+    Result result;
+    Phase phase = Phase::idle;
+
+    std::unique_ptr<ScopedSetup> restore;
+    std::unique_ptr<CaptureBufferScope> captureScope;
+    std::unique_ptr<hal::Capture> capture;
+    std::unique_ptr<hal::TimestampTap> tap;
+    AudioIODevice* device = nullptr;
+    AudioObjectID captureId = kAudioObjectUnknown;
+    uint32 startCount = 0;
+    double startedMs = 0.0;
+    int armed = 0;
+
+    // What the worker reads; copied before it starts so the audio thread cannot change it underneath.
+    std::vector<float> burst;
+    std::vector<uint64_t> injectionOutputNs;
+    std::thread worker;
+    std::atomic<bool> analysed { false };
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Session)
+};
+
+// Runs a whole session to the end, waiting by spinning the message loop. For the command-line modes.
 Result runSession (Engine&, const Options&);
+
+// The excess to keep from a finished session: the median over the trustworthy runs, when at least
+// `minRuns` of them were. Nothing when the session failed or too few runs could be trusted.
+std::optional<ExcessRecord> makeExcessRecord (const Result&, const String& outputDevice, juce::Time now, int minRuns = 3);
 
 // Runs the load without injecting anything, for the overload and CPU columns of the sweep.
 struct LoadResult { int overloads = 0; HostCallback::Load load; };

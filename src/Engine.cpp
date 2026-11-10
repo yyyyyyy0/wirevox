@@ -1,5 +1,6 @@
 #include "Engine.h"
 
+#include "Settings.h"
 #include "Text.h"
 
 #include <cmath>
@@ -58,6 +59,9 @@ void Engine::openFromSettings (const XmlElement* settingsRoot)
 
     if (settingsRoot != nullptr && settingsRoot->hasAttribute ("cycleUsage"))
         setExperiments ({ validCycleUsage (settingsRoot->getDoubleAttribute ("cycleUsage", 0.0)) });
+
+    if (settingsRoot != nullptr)
+        excess = readExcess (*settingsRoot);
 }
 
 void Engine::start()
@@ -80,6 +84,13 @@ void Engine::refreshHal()
         deviceRates = {};
         return;
     }
+
+    // A measurement belongs to one output device at one rate. A device is only judged while it is open:
+    // one that is missing at launch (Loopback not running yet) must not cost the saved result.
+    if (excess.has_value())
+        if (const auto setup = deviceManager.getAudioDeviceSetup();
+            ! excessApplies (*excess, setup.outputDeviceName, device->getCurrentSampleRate()))
+            excess.reset();
 
     // Looking the aggregate up walks every device on the system, so it only happens after a device start.
     const auto startCount = callback.getStartCount();
@@ -110,6 +121,34 @@ void Engine::setExperiments (const Experiments& next)
         experiments.ioCycleUsage = validCycleUsage ((double) *experiments.ioCycleUsage);
 
     applyExperiments();
+}
+
+double Engine::getCycleUsage() const
+{
+    float usage = 0.0f;
+
+    if (aggregate != kAudioObjectUnknown && hal::readIoCycleUsage (aggregate, usage) && validCycleUsage ((double) usage).has_value())
+        return (double) usage;
+
+    return (double) experiments.ioCycleUsage.value_or (1.0f);
+}
+
+void Engine::setExcess (const ExcessRecord& record)
+{
+    excess = isUsable (record) ? std::optional<ExcessRecord> (record) : std::nullopt;
+}
+
+std::optional<ExcessRecord> Engine::getExcess() const
+{
+    if (! excess.has_value())
+        return std::nullopt;
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+
+    if (device != nullptr && ! excessApplies (*excess, deviceManager.getAudioDeviceSetup().outputDeviceName, device->getCurrentSampleRate()))
+        return std::nullopt;
+
+    return excess;
 }
 
 void Engine::applyExperiments()

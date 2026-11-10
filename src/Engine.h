@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Breakdown.h"
 #include "Chain.h"
 #include "Hal.h"
 #include "HostCallback.h"
@@ -77,6 +78,17 @@ public:
     void setExperiments (const Experiments&);
     const Experiments& getExperiments() const noexcept { return experiments; }
 
+    // The IO cycle usage the aggregate runs at now: read from the device when it can be, otherwise the
+    // experiment's value, otherwise the device's default of 1.0.
+    double getCycleUsage() const;
+
+    //==============================================================================
+    // What the output device adds beyond what it declares, as last measured (Measure.h). The record is
+    // only ever returned for the output device and the rate that are open now: it is dropped the first
+    // time refreshHal() sees another device or rate, and never written for one.
+    void setExcess (const ExcessRecord&);
+    std::optional<ExcessRecord> getExcess() const;
+
     // Reopens the device with this buffer size (JUCE rounds it to a power of two). Returns the size the
     // callback actually receives, or 0 when the device does not open. JUCE's own record of the chosen
     // setup is not touched, so this is a trial until the caller persists it (see getPersistedAudio).
@@ -110,6 +122,8 @@ private:
     DeviceRates deviceRates;
     Experiments experiments;
     bool started = false;
+
+    std::optional<ExcessRecord> excess;
 
     struct Held { std::unique_ptr<XmlElement> device; std::optional<float> cycleUsage; };
     std::optional<Held> held;

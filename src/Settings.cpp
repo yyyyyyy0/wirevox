@@ -101,6 +101,36 @@ void writeThemeId (XmlElement& root, const String& id)
     root.setAttribute ("theme", id);
 }
 
+std::optional<ExcessRecord> readExcess (const XmlElement& root)
+{
+    const auto* element = root.getChildByName ("LATENCY_EXCESS");
+
+    if (element == nullptr)
+        return std::nullopt;
+
+    ExcessRecord record;
+    record.outputDevice = element->getStringAttribute ("outputDevice");
+    record.sampleRate = element->getDoubleAttribute ("sampleRate", 0.0);
+    record.excessMs = element->getDoubleAttribute ("excessMs", -1.0);
+    record.runs = element->getIntAttribute ("runs", 0);
+    record.measuredAt = Time::fromISO8601 (element->getStringAttribute ("measuredAt"));
+
+    if (! isUsable (record))
+        return std::nullopt;
+
+    return record;
+}
+
+void writeExcess (XmlElement& root, const ExcessRecord& record)
+{
+    auto* element = root.createNewChildElement ("LATENCY_EXCESS");
+    element->setAttribute ("outputDevice", record.outputDevice);
+    element->setAttribute ("sampleRate", record.sampleRate);
+    element->setAttribute ("excessMs", record.excessMs);
+    element->setAttribute ("runs", record.runs);
+    element->setAttribute ("measuredAt", record.measuredAt.toISO8601 (true));
+}
+
 std::unique_ptr<XmlElement> buildSettingsXml (const String& themeId, const Engine& engine)
 {
     auto root = std::make_unique<XmlElement> ("MIC_FX_HOST");
@@ -113,6 +143,9 @@ std::unique_ptr<XmlElement> buildSettingsXml (const String& themeId, const Engin
 
     if (audio.cycleUsage.has_value())
         root->setAttribute ("cycleUsage", (double) *audio.cycleUsage);
+
+    if (const auto excess = engine.getExcess())
+        writeExcess (*root, *excess);
 
     root->addChildElement (engine.chain.toXml().release());
     return root;
