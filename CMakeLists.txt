@@ -40,6 +40,7 @@ add_subdirectory(JUCE)
 juce_add_gui_app(MicFxHost
     PRODUCT_NAME "${MFX_PRODUCT_NAME}"
     BUNDLE_ID local.nil.${MFX_PRODUCT_ID}
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.png"
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "${MFX_PRODUCT_NAME} がマイク入力にエフェクトを掛けるため、マイクへのアクセスが必要です。"
     NEEDS_WEB_BROWSER FALSE
