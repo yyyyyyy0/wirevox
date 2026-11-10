@@ -100,3 +100,6 @@ foreach(plugin IN LISTS MFX_TEST_PLUGINS)
 endforeach()
 
 add_test(NAME "${MFX_PRODUCT_NAME} settings migration and theme" COMMAND MicFxHost --selftest-settings)
+add_test(NAME "${MFX_PRODUCT_NAME} delay estimator" COMMAND MicFxHost --selftest-correlate)
+add_test(NAME "${MFX_PRODUCT_NAME} hard bypass" COMMAND MicFxHost --selftest-chain)
+add_test(NAME "${MFX_PRODUCT_NAME} sweep choice and restore" COMMAND MicFxHost --selftest-sweep)
