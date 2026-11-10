@@ -54,6 +54,9 @@ target_sources(MicFxHost PRIVATE
     src/Hal.cpp
     src/HostCallback.cpp
     src/Engine.cpp
+    src/LatencyTuner.cpp
+    src/Measure.cpp
+    src/MeasureCommand.cpp
     src/MainComponent.cpp
     src/Theme.cpp
     src/ThemeRegistry.cpp
