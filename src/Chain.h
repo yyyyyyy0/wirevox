@@ -36,12 +36,20 @@ public:
     const Slot& operator[] (int index) const    { return slots[(size_t) index]; }
 
     bool add (const PluginDescription&, String& error);
+
+    // For tests: puts an already built processor into the chain as if it had been loaded from `description`.
+    void addProcessor (std::unique_ptr<AudioProcessor>, const PluginDescription&);
     void remove (int index);
     void move (int index, int newIndex);
     void setBypassed (int index, bool shouldBypass);
 
-    // Connects input node -> live slots in order -> output node. A bypassed slot stays wired in and
-    // is bypassed by the graph, so toggling it does not change the reported latency.
+    // Takes every slot out of the signal path without touching the slots' own bypass flags. The latency
+    // measurement uses it so that plugins do not alter the test burst.
+    void setForceBypassAll (bool);
+
+    // Connects input node -> live slots in order -> output node. A bypassed slot is left out of the path
+    // entirely and its processor is suspended, so it adds neither latency nor CPU; its instance and state
+    // stay in the slot. (A soft bypass inside the plugin keeps its latency and its processing.)
     // Call again whenever the device's channel configuration changes.
     void rewire();
 
@@ -53,6 +61,7 @@ public:
 private:
     void clear();
     bool instantiate (Slot&);
+    void attach (Slot&, std::unique_ptr<AudioProcessor>);
 
     void audioProcessorParameterChanged (AudioProcessor*, int, float) override {}
     void audioProcessorChanged (AudioProcessor*, const ChangeDetails&) override;
@@ -62,6 +71,7 @@ private:
     AudioProcessorGraph graph;
     AudioProcessorGraph::Node::Ptr inputNode, outputNode;
     std::vector<Slot> slots;
+    bool forceBypassAll = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Chain)
 };

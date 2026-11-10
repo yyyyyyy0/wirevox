@@ -78,6 +78,12 @@ bool Chain::instantiate (Slot& slot)
         return false;
     }
 
+    attach (slot, std::move (instance));
+    return true;
+}
+
+void Chain::attach (Slot& slot, std::unique_ptr<AudioProcessor> instance)
+{
     preferStereoMainBuses (*instance);
 
     if (slot.state.getSize() > 0)
@@ -86,9 +92,16 @@ bool Chain::instantiate (Slot& slot)
     instance->addListener (this);
 
     slot.node = graph.addNode (std::move (instance), std::nullopt, AudioProcessorGraph::UpdateKind::none);
-    slot.node->setBypassed (slot.bypassed);
     slot.error.clear();
-    return true;
+}
+
+void Chain::addProcessor (std::unique_ptr<AudioProcessor> processor, const PluginDescription& description)
+{
+    Slot slot;
+    slot.description = description;
+    attach (slot, std::move (processor));
+    slots.push_back (std::move (slot));
+    rewire();
 }
 
 bool Chain::add (const PluginDescription& description, String& error)
@@ -138,11 +151,17 @@ void Chain::setBypassed (int index, bool shouldBypass)
     if (! isPositiveAndBelow (index, size()))
         return;
 
-    auto& slot = slots[(size_t) index];
-    slot.bypassed = shouldBypass;
+    slots[(size_t) index].bypassed = shouldBypass;
+    rewire();
+}
 
-    if (slot.node != nullptr)
-        slot.node->setBypassed (shouldBypass);
+void Chain::setForceBypassAll (bool shouldForce)
+{
+    if (forceBypassAll == shouldForce)
+        return;
+
+    forceBypassAll = shouldForce;
+    rewire();
 }
 
 void Chain::clear()
@@ -193,6 +212,25 @@ void Chain::rewire()
             continue;
 
         auto& processor = *slot.node->getProcessor();
+
+        // An unconnected node would still be processed, so it is also suspended (the graph then only
+        // clears its buffer). Resuming starts from a clean state instead of stale delay lines.
+        const auto inPath = ! slot.bypassed && ! forceBypassAll;
+
+        if (inPath && processor.isSuspended())
+        {
+            const ScopedLock lock (processor.getCallbackLock());
+            processor.reset();
+            processor.suspendProcessing (false);
+        }
+        else if (! inPath && ! processor.isSuspended())
+        {
+            processor.suspendProcessing (true);
+        }
+
+        if (! inPath)
+            continue;
+
         const auto id = slot.node->nodeID;
         const auto pluginIn  = processor.getMainBusNumInputChannels();
         const auto pluginOut = processor.getMainBusNumOutputChannels();
