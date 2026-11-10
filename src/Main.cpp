@@ -36,7 +36,9 @@ class MicFxHostApplication final : public JUCEApplication
 public:
     const String getApplicationName() override       { return mfx::productName; }
     const String getApplicationVersion() override    { return JUCE_APPLICATION_VERSION_STRING; }
-    bool moreThanOneInstanceAllowed() override       { return false; }
+    // An instance on its own --settings file is a separate rack (used for visual checks while the
+    // real one is live); two on the default settings would open the same devices twice.
+    bool moreThanOneInstanceAllowed() override       { return getCommandLineParameterArray().contains ("--settings"); }
 
     void initialise (const String&) override
     {
