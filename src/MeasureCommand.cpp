@@ -119,6 +119,17 @@ namespace
     // Returns an empty string on success, otherwise what went wrong.
     String openSession (Session& s, const StringArray& args, bool loadChain, Report& report)
     {
+        // Checked before any device is opened.
+        Experiments experiments;
+
+        if (const auto usage = getOption (args, "--io-cycle-usage"); usage.isNotEmpty())
+        {
+            experiments.ioCycleUsage = validCycleUsage (usage.getDoubleValue());
+
+            if (! experiments.ioCycleUsage.has_value())
+                return "--io-cycle-usage needs a number above 0 and at most 1, not '" + usage + "'";
+        }
+
         const auto settings = loadSettings();
 
         if (settings == nullptr)
@@ -161,16 +172,6 @@ namespace
         if (const auto size = getOption (args, "--buffer"); size.isNotEmpty())
             if (s.engine.setBufferSize (size.getIntValue()) == 0)
                 return "could not open the device at buffer size " + size;
-
-        Experiments experiments;
-
-        if (const auto usage = getOption (args, "--io-cycle-usage"); usage.isNotEmpty())
-        {
-            experiments.ioCycleUsage = validCycleUsage (usage.getDoubleValue());
-
-            if (! experiments.ioCycleUsage.has_value())
-                return "--io-cycle-usage needs a number above 0 and at most 1, not '" + usage + "'";
-        }
 
         s.engine.setExperiments (experiments);
         measure::wait (500);
