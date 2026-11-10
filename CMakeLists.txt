@@ -50,6 +50,10 @@ target_sources(MicFxHost PRIVATE
     src/Chain.cpp
     src/Settings.cpp
     src/CommandLine.cpp
+    src/Correlate.cpp
+    src/Hal.cpp
+    src/HostCallback.cpp
+    src/Engine.cpp
     src/MainComponent.cpp
     src/Theme.cpp
     src/ThemeRegistry.cpp
@@ -73,6 +77,7 @@ target_compile_definitions(MicFxHost PRIVATE
 
 target_link_libraries(MicFxHost PRIVATE
     juce::juce_audio_utils
+    juce::juce_dsp
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags)
