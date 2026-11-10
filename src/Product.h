@@ -6,7 +6,8 @@ namespace mfx
 
 constexpr const char* productName = MFX_PRODUCT_NAME;
 
-// Folder the app used before it was renamed; only read, to carry the settings over.
-constexpr const char* legacyProductName = "mic-fx-host";
+// Folders the app used under its earlier names, newest first; only read, to carry the settings over.
+// WIREVOX <- VOXRACK <- mic-fx-host.
+inline constexpr const char* legacyProductNames[] = { "VOXRACK", "mic-fx-host" };
 
 } // namespace mfx

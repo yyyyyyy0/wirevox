@@ -135,30 +135,61 @@ namespace
         };
 
         const auto contents = String ("<MIC_FX_HOST><CHAIN/></MIC_FX_HOST>");
-        const File root = File::getSpecialLocation (File::tempDirectory).getNonexistentChildFile ("voxrack-settings-selftest", {}, false);
+        const File root = File::getSpecialLocation (File::tempDirectory).getNonexistentChildFile ("wirevox-settings-selftest", {}, false);
+
+        // Every home below is a temporary directory; the real Application Support folders are never read.
+        const auto write = [] (const File& file, const String& text)
+        {
+            file.create();
+            file.replaceWithText (text);
+        };
 
         {
             const auto home = root.getChildFile ("carry-over");
-            const auto legacy = legacySettingsFile (home);
+            const auto files = legacySettingsFiles (home);
             const auto target = defaultSettingsFile (home);
-            legacy.create();
-            legacy.replaceWithText (contents);
+            check (files.size() == 2 && files[0].getParentDirectory().getFileName() == "VOXRACK"
+                       && files[1].getParentDirectory().getFileName() == "mic-fx-host",
+                   "the legacy chain is VOXRACK, then mic-fx-host");
+            write (files[0], contents);
 
-            check (migrateLegacySettings (home) == Migration::copied, "legacy settings are copied when the new file is missing");
+            check (migrateLegacySettings (home) == Migration::copied, "VOXRACK settings are copied when the new file is missing");
             check (target.loadFileAsString() == contents, "the copy has the same contents");
-            check (legacy.loadFileAsString() == contents, "the legacy file is left in place");
+            check (files[0].loadFileAsString() == contents, "the VOXRACK file is left in place");
             check (target.getParentDirectory().getNumberOfChildFiles (File::findFiles) == 1, "no temporary file is left behind");
             check (migrateLegacySettings (home) == Migration::notNeeded, "a second run does nothing");
         }
 
         {
-            const auto home = root.getChildFile ("keep-existing");
-            const auto legacy = legacySettingsFile (home);
+            const auto home = root.getChildFile ("oldest-only");
+            const auto files = legacySettingsFiles (home);
             const auto target = defaultSettingsFile (home);
-            legacy.create();
-            legacy.replaceWithText ("legacy");
-            target.create();
-            target.replaceWithText ("current");
+            write (files[1], contents);
+
+            check (migrateLegacySettings (home) == Migration::copied, "mic-fx-host settings are copied when only they exist");
+            check (target.loadFileAsString() == contents, "the copy from the oldest folder has the same contents");
+            check (files[1].loadFileAsString() == contents, "the mic-fx-host file is left in place");
+            check (! files[0].getParentDirectory().exists(), "no VOXRACK folder is created");
+        }
+
+        {
+            const auto home = root.getChildFile ("newest-wins");
+            const auto files = legacySettingsFiles (home);
+            write (files[0], "voxrack");
+            write (files[1], "mic-fx-host");
+
+            check (migrateLegacySettings (home) == Migration::copied, "settings are copied when both older folders exist");
+            check (defaultSettingsFile (home).loadFileAsString() == "voxrack", "the VOXRACK file wins over the mic-fx-host one");
+            check (files[0].loadFileAsString() == "voxrack" && files[1].loadFileAsString() == "mic-fx-host", "both older files are left in place");
+        }
+
+        {
+            const auto home = root.getChildFile ("keep-existing");
+            const auto files = legacySettingsFiles (home);
+            const auto target = defaultSettingsFile (home);
+            write (files[0], "legacy");
+            write (files[1], "older");
+            write (target, "current");
 
             check (migrateLegacySettings (home) == Migration::notNeeded, "nothing happens when the new file already exists");
             check (target.loadFileAsString() == "current", "the existing new file is not overwritten");

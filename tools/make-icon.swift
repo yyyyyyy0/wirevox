@@ -1,6 +1,6 @@
 import AppKit
 
-// Renders the VOXRACK app icon (RACK '84 faceplate) to a 1024x1024 PNG.
+// Renders the WIREVOX app icon (RACK '84 faceplate) to a 1024x1024 PNG.
 let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon.png"
 let size: CGFloat = 1024
 let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size), pixelsHigh: Int(size), bitsPerSample: 8,

@@ -365,7 +365,7 @@ int selfTestEngine()
 {
     Checker check;
 
-    const auto folder = File::getSpecialLocation (File::tempDirectory).getNonexistentChildFile ("voxrack-engine-selftest", {}, false);
+    const auto folder = File::getSpecialLocation (File::tempDirectory).getNonexistentChildFile ("wirevox-engine-selftest", {}, false);
     folder.createDirectory();
     useSettingsFile (folder.getChildFile ("settings.xml"));
 
@@ -935,7 +935,7 @@ int selfTestBreakdown()
 {
     Checker check;
 
-    const auto folder = File::getSpecialLocation (File::tempDirectory).getNonexistentChildFile ("voxrack-breakdown-selftest", {}, false);
+    const auto folder = File::getSpecialLocation (File::tempDirectory).getNonexistentChildFile ("wirevox-breakdown-selftest", {}, false);
     folder.createDirectory();
     useSettingsFile (folder.getChildFile ("settings.xml"));
 

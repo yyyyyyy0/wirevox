@@ -12,12 +12,14 @@ namespace mfx
 class Engine;
 
 juce::File defaultSettingsFile (const juce::File& home);
-juce::File legacySettingsFile (const juce::File& home);
+
+// The settings files of the earlier product names, newest first (VOXRACK, then mic-fx-host).
+juce::Array<juce::File> legacySettingsFiles (const juce::File& home);
 
 enum class Migration { notNeeded, copied, failed };
 
-// Copies the pre-rename settings file to the new location when only the old one exists.
-// The old file is left in place. `home` is a parameter so tests can use a temporary directory.
+// Copies the newest existing pre-rename settings file to the new location when the new one is missing.
+// The old files are left in place. `home` is a parameter so tests can use a temporary directory.
 Migration migrateLegacySettings (const juce::File& home);
 
 // True when both paths lead to the same file, whatever `..` segments, symbolic links (also in the

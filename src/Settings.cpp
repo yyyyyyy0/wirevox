@@ -51,17 +51,35 @@ File defaultSettingsFile (const File& homeDirectory)
     return settingsFileIn (homeDirectory, productName);
 }
 
-File legacySettingsFile (const File& homeDirectory)
+Array<File> legacySettingsFiles (const File& homeDirectory)
 {
-    return settingsFileIn (homeDirectory, legacyProductName);
+    Array<File> files;
+
+    for (auto* name : legacyProductNames)
+        files.add (settingsFileIn (homeDirectory, name));
+
+    return files;
 }
 
 Migration migrateLegacySettings (const File& homeDirectory)
 {
     const auto target = defaultSettingsFile (homeDirectory);
-    const auto legacy = legacySettingsFile (homeDirectory);
 
-    if (target.exists() || ! legacy.existsAsFile())
+    if (target.exists())
+        return Migration::notNeeded;
+
+    File legacy;
+
+    for (auto& candidate : legacySettingsFiles (homeDirectory))
+    {
+        if (candidate.existsAsFile())
+        {
+            legacy = candidate;
+            break;
+        }
+    }
+
+    if (legacy == File())
         return Migration::notNeeded;
 
     if (! target.getParentDirectory().createDirectory())

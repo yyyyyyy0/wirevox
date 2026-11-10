@@ -1,30 +1,41 @@
-# VOXRACK
+# WIREVOX
 
-マイク入力に VST3 プラグイン（ボイスチェンジャー、EQ、ノイズ除去など）を直列に掛け、Loopback などの仮想デバイスへ出力する小さなホストです。通話アプリ側ではその仮想デバイスをマイクとして選びます。
+WIREVOX は、マイクの音に VST3 プラグイン（ボイスチェンジャー、EQ、ノイズ除去など）を直列に掛け、仮想オーディオデバイスへ出力する macOS 用の小さなホストです。通話アプリ側ではその仮想デバイスをマイクとして選びます。通話用のマイクに好きなエフェクトを掛けたいが、通常の DAW では遅延が大きい、という場面のために作りました。マイクの取り込みから出力までを 1 本の IOProc で処理し、バッファを小さくして遅延を抑えます。遅延は部分ごとの内訳（入力機器、バッファ、各プラグイン、出力デバイス、仮想デバイスが足す分）で画面に出し、プラグインごとの処理時間も測ります。処理した声を、通話の相手に送る出力とは別のデバイスで自分だけ聞くモニター出力もあります。
 
-物理マイク → VST3 を順に通す → 仮想デバイス（Loopback の `Discord out` など）
+物理マイク → VST3 を順に通す → 仮想デバイス（BlackHole、Loopback など）
+
+## 必要なもの
+
+- macOS（動作確認は Apple Silicon の Mac だけです）
+- Command Line Tools または Xcode
+- CMake 3.22 以上
+- 仮想オーディオデバイス（BlackHole、Loopback など。出力先として使います）
+- 使いたい VST3 プラグイン
 
 ## ビルド
 
-必要なもの: macOS、Command Line Tools、CMake 3.22 以上。JUCE は git submodule（`JUCE/`、タグ 9.0.5）で、ビルド中にネットワークは使いません。
+JUCE は git submodule（`JUCE/`、タグ 9.0.5）です。ビルド中にネットワークは使いません。
 
 ```sh
-git submodule update --init   # 初回のみ。JUCE を取得済みなら不要
+git clone --recursive https://github.com/yyyyyyy0/wirevox.git
+cd wirevox
+# すでに clone 済みで JUCE/ が空のときは次を実行します
+git submodule update --init
 cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-成果物: `build/MicFxHost_artefacts/Release/VOXRACK.app`
+成果物: `build/Wirevox_artefacts/Release/WIREVOX.app`
 
 ```sh
-open build/MicFxHost_artefacts/Release/VOXRACK.app
+open build/Wirevox_artefacts/Release/WIREVOX.app
 ```
 
 Command Line Tools の入れ方によっては、clang が標準 C++ ヘッダ（`<algorithm>` など）を見つけられないことがあります。`CMakeLists.txt` が検出して、SDK 内の libc++ ヘッダを使うように自動で切り替えます。
 
 ## 使い方
 
-1. 初回起動ではデバイスを開きません。マイクがスピーカーに直結してハウリングするのを避けるためです。左のパネルで出力（Loopback の仮想デバイス）と入力（マイク）を選びます。
+1. 初回起動ではデバイスを開きません。マイクがスピーカーに直結してハウリングするのを避けるためです。左のパネルで出力（仮想デバイス）と入力（マイク）を選びます。
 2. 入力チャンネルは、マイクがつながっているチャンネルだけにチェックを入れます。1 チャンネルなら左右の両方に同じ音を送ります。2 チャンネル以上なら 1 番目を L、2 番目を R にします。
 3. 「プラグインを追加...」から `.vst3` を選ぶか、`.vst3` をウィンドウへドロップします。追加はこのファイルだけをスキャンします。
 4. 上下ボタンで順番を変え、バイパスで一時的に外し、編集でプラグイン自身の画面を開きます。
@@ -33,7 +44,7 @@ Command Line Tools の入れ方によっては、clang が標準 C++ ヘッダ�
 7. 処理した声を別のデバイスでも聞きたいときは、左のパネルの下の「モニター出力」で、機器とチャンネルの組を選んでチェックを入れます（下の「モニター出力」の節）。
 8. チェーンの下の「LATENCY BREAKDOWN」に、遅延のどこが大きいかと、プラグインごとの処理時間が出ます。「仮想デバイスを計測」で、Loopback などが足している遅延も測れます（その下の「遅延の内訳」の節）。
 
-遅延を小さくするには、バッファサイズを小さくします。JUCE はデバイスを開くとき、設定ファイルのサンプルレート（`audioDeviceRate`）を `kAudioDevicePropertyNominalSampleRate` としてデバイスに書き込みます。そのため、アプリがレートを変えないとは言えません。仮想デバイス（Loopback の `fxhost out` など）はアプリのレートに追従して書き換わります（実測で 44100 から 48000 に変わったことがあります）。入力機器が設定のレートで動けない場合（例: 入力が 192 kHz、アプリが 44.1 kHz）は、機器のレートはそのままで、JUCE が内部で作る合成デバイスがレート変換（ドリフト補正）をします。この書き込みはアプリからは止められません。そこで、入力機器と出力デバイスの両方について、開いた直後の本来のレートがアプリの動作レートと違うときは、ステータス行に警告を出します（レート変換が入り、遅延と負荷が増えます）。`--measure` などは、デバイスを開く前と後の両方のレートを入力・出力ごとに表示し、動いていれば `CHANGED` と知らせます。
+遅延を小さくするには、バッファサイズを小さくします。JUCE はデバイスを開くとき、設定ファイルのサンプルレート（`audioDeviceRate`）を `kAudioDevicePropertyNominalSampleRate` としてデバイスに書き込みます。そのため、アプリがレートを変えないとは言えません。仮想デバイスはアプリのレートに追従して書き換わることがあります（作者の環境の Loopback の仮想デバイス `fxhost out` では、実測で 44100 から 48000 に変わったことがあります）。入力機器が設定のレートで動けない場合（例: 入力が 192 kHz、アプリが 44.1 kHz）は、機器のレートはそのままで、JUCE が内部で作る合成デバイスがレート変換（ドリフト補正）をします。この書き込みはアプリからは止められません。そこで、入力機器と出力デバイスの両方について、開いた直後の本来のレートがアプリの動作レートと違うときは、ステータス行に警告を出します（レート変換が入り、遅延と負荷が増えます）。`--measure` などは、デバイスを開く前と後の両方のレートを入力・出力ごとに表示し、動いていれば `CHANGED` と知らせます。
 
 ## テーマ
 
@@ -57,14 +68,14 @@ Command Line Tools の入れ方によっては、clang が標準 C++ ヘッダ�
 アプリの中で「入力に試験音を入れてから、出力デバイスの入力側で聞こえるまで」を測ります。ケーブルは要りません。
 
 ```sh
-APP=build/MicFxHost_artefacts/Release/VOXRACK.app/Contents/MacOS/VOXRACK
+APP=build/Wirevox_artefacts/Release/WIREVOX.app/Contents/MacOS/WIREVOX
 "$APP" --measure --settings <設定ファイル>                 # 10 回測って中央値・最小・最大・相関の質を出す
 "$APP" --measure --settings <設定ファイル> --with-chain    # 実際のプラグインを通して測る（遅延の申告値を引く）
 "$APP" --measure-sweep --settings <設定ファイル>           # バッファとスイッチを総当たりして、安定する最速を探す
 "$APP" --tune --settings <設定ファイル>                    # MIN LATENCY ボタンと同じ探索を窓なしで
 ```
 
-設定ファイルは、実際の設定（`~/Library/Application Support/VOXRACK/settings.xml`）の写しで構いません。`--settings` を付けない場合は `--use-default-settings` が要ります。どちらの場合も、ほかの VOXRACK のプロセスが動いていると拒否します（写しでも同じデバイスを開き直して、動いている方の音を途切れさせるため）。動いている VOXRACK がそのデバイスを使っていないと分かっているときだけ `--force` を付けます。結果は設定ファイルと同じフォルダの `measure-<日時>.txt` にも書きます。測定の間、出力デバイスには -20 dBFS の短い試験音が流れ、入力はその間だけ試験音に置き換わります（マイクの音は通りません）。入力機器と出力デバイスの本来のレートを前後で読み、変わっていれば知らせます。
+設定ファイルは、実際の設定（`~/Library/Application Support/WIREVOX/settings.xml`）の写しで構いません。`--settings` を付けない場合は `--use-default-settings` が要ります。どちらの場合も、ほかの WIREVOX のプロセスが動いていると拒否します（写しでも同じデバイスを開き直して、動いている方の音を途切れさせるため）。動いている WIREVOX がそのデバイスを使っていないと分かっているときだけ `--force` を付けます。結果は設定ファイルと同じフォルダの `measure-<日時>.txt` にも書きます。測定の間、出力デバイスには -20 dBFS の短い試験音が流れ、入力はその間だけ試験音に置き換わります（マイクの音は通りません）。入力機器と出力デバイスの本来のレートを前後で読み、変わっていれば知らせます。
 
 - 試験音: 50 ms の線形スイープ（300 Hz から 0.4 x レート）。帯域内にエネルギーが収まるのでレート変換を通っても相関のピークが細く（約 30 マイクロ秒）、時間帯域幅積で雑音から 30 dB 以上浮きます。
 - 起点: 入力バッファの先頭フレームの「ハードウェアから取り込まれた時刻」（HAL の `inInputTime`）。JUCE がコールバックに渡す `hostTimeNs` は、入出力が両方あるとき `inOutputTime`（出力がハードウェアに渡される時刻）で、入力時刻ではありません（`JUCE/modules/juce_audio_devices/native/juce_CoreAudio_mac.cpp` の 1609 から 1615 行）。そこで合成デバイスに時刻だけを書き留める 2 本目の IOProc を付け、同じサイクルの出力時刻で突き合わせて入力時刻を得ます。
@@ -73,7 +84,9 @@ APP=build/MicFxHost_artefacts/Release/VOXRACK.app/Contents/MacOS/VOXRACK
 - 雑音の見積もり: 時刻の分解能は mach tick の 41.7 ns、時刻は HAL がサンプル位置から作るので、仮想デバイスではばらつきがほぼ 0（実測の標準偏差は 0.01 ms 以下）。実機の入力デバイスを使う場合は HAL の時刻のゆれが入る可能性があります。相関の質（1 に近いほど試験音がそのまま届いている）とサイドローブ比が悪い回は「REJECTED」として集計から外します。
 - 測れないもの: 試験音は合成デバイスの入力側のあとで入れるため、入力機器自身の遅延（例: Discrete4 の内部）と、入力側のドリフト補正（レート変換）が内部で足す遅延は含まれません。これらは HAL の申告値のままです。
 
-### 実測の結果（この Mac、Discrete4_Pro_SC から fxhost out、44.1 kHz、64 サンプル）
+### 実測の結果（作者の環境、Discrete4_Pro_SC から fxhost out、44.1 kHz、64 サンプル）
+
+以下の数値は、作者の Mac、作者のオーディオインターフェース（Discrete4_Pro_SC）、作者の Loopback の仮想デバイス（`fxhost out`）での測定です。必要な機器ではなく、環境が違えば値も変わります。
 
 | 区間 | 値 |
 | --- | --- |
@@ -81,7 +94,7 @@ APP=build/MicFxHost_artefacts/Release/VOXRACK.app/Contents/MacOS/VOXRACK
 | fxhost out（Loopback のパススルー）が足す分 | 17.415 ms（768 サンプルで一定。48 kHz では 16.000 ms） |
 | 合計（入力の取り込みから fxhost out の入力側で利用可能になるまで） | 20.522 ms |
 
-この Mac のチェーン（BBD-Chorus と RX 11 Voice De-noise）で総当たりした結果（`--measure-sweep`、20 秒の確認つき）:
+作者のチェーン（BBD-Chorus と RX 11 Voice De-noise）で総当たりした結果（`--measure-sweep`、20 秒の確認つき）:
 
 | 設定 | 遅延 | 安定性 |
 | --- | --- | --- |
@@ -152,13 +165,13 @@ IO サイクル使用率（`kAudioDevicePropertyIOCycleUsage`）は、合成デ�
 
 ### しくみ
 
-JUCE の CoreAudio デバイスは、入力 1 台と出力 1 台を 1 つの合成デバイスにまとめて開き、時計は出力デバイスのものを使います。出力は 1 台しか渡せないので、モニターを使うときは VOXRACK が HAL（`AudioHardwareCreateAggregateDevice`）で「メイン出力 + モニター機器」の合成デバイスを作り、それを JUCE に出力デバイスとして渡します（`src/Monitor.cpp`、HAL の部分は `src/Hal.cpp` の `PrivateAggregate`）。
+JUCE の CoreAudio デバイスは、入力 1 台と出力 1 台を 1 つの合成デバイスにまとめて開き、時計は出力デバイスのものを使います。出力は 1 台しか渡せないので、モニターを使うときは WIREVOX が HAL（`AudioHardwareCreateAggregateDevice`）で「メイン出力 + モニター機器」の合成デバイスを作り、それを JUCE に出力デバイスとして渡します（`src/Monitor.cpp`、HAL の部分は `src/Hal.cpp` の `PrivateAggregate`）。
 
 - 時計は、メイン出力です（`kAudioAggregateDeviceClockDeviceKey` と main sub-device）。モニター機器にはドリフト補正（高品質）を付けます。ドリフトの処理は全部 HAL がします。
 - コールバックでは、メイン出力のチャンネルだけをプラグインのチェーンに渡し、チェーンが書いた 1 チャンネル目と 2 チャンネル目（メインが 1 チャンネルなら 1 チャンネル目を左右に）を、モニターの組へ複製します（`copyToMonitor`）。確保もロックもありません。メインのチャンネルが 1 つも有効でなければ、モニターは無音です。
 - モニター機器がメイン出力と同じデバイスなら、合成デバイスは作りません。同じデバイスの、もう 2 チャンネルとして扱います。その組をメイン出力のチャンネルに含めていると開けず（JUCE が保存するチャンネル選択を勝手に狭めないため）、モニターをオフに戻して理由を出します。チャンネル一覧には、その組が「[モニター]」と出ます。
 - JUCE の `AudioDeviceManager` には合成デバイスを見せません。`MonitorDeviceType` が CoreAudio のデバイス型の前に立ち、モニターがオフのあいだは CoreAudio のデバイスをそのまま返します。オンのときは `MonitorDevice` を返し、これがデバイス名、チャンネル一覧、有効なチャンネル、遅延の申告をメイン出力のものとして見せます。デバイスのパネル、保存される DEVICESETUP、`LATENCY_EXCESS`（出力デバイス名とレートが鍵）、MIN LATENCY の「デバイスが変わっていないか」の確認、仮想デバイスの計測は、どれも JUCE が返すメイン出力の名前をそのまま使うので、合成デバイスの名前はどこにも現れません。
-- JUCE は、渡された合成デバイスを自分では開かず、中の sub-device を並べ直して、もう一段自前の合成デバイスを作ります（`juce_CoreAudio_mac.cpp` の 1192 から 1200 行、1218 から 1264 行、`AggregateDeviceDescription`）。そのため VOXRACK の合成デバイスは、JUCE のデバイスが生きている間だけ必要で、デバイスを閉じるとき、モニターを切るとき、メイン出力を替えるとき、終了するときに壊します（`MonitorDevice` のデストラクタ。JUCE 側を先に片付けてから壊します）。
+- JUCE は、渡された合成デバイスを自分では開かず、中の sub-device を並べ直して、もう一段自前の合成デバイスを作ります（`juce_CoreAudio_mac.cpp` の 1192 から 1200 行、1218 から 1264 行、`AggregateDeviceDescription`）。そのため WIREVOX の合成デバイスは、JUCE のデバイスが生きている間だけ必要で、デバイスを閉じるとき、モニターを切るとき、メイン出力を替えるとき、終了するときに壊します（`MonitorDevice` のデストラクタ。JUCE 側を先に片付けてから壊します）。
 
 ### 合成デバイスは private にした
 
@@ -168,7 +181,7 @@ JUCE の CoreAudio デバイスは、入力 1 台と出力 1 台を 1 つの合�
 - private な合成デバイスは、作ったプロセスからは見えます。このアプリの `findJuceAggregate()`（`Hal.cpp`）は、JUCE の private な合成デバイスを同じ一覧から見つけていて、`--measure` の実測はそれに頼っています。HAL のヘッダは、private な合成デバイスを「作ったプロセス専用で、起動をまたいで残らない」と説明しています。
 - 公開にすると、Audio MIDI Setup と他のアプリに出て、異常終了の残骸が残ります。名前で消すのは危ないので UID の接頭辞で見分ける必要が出ますが、private ならプロセスが終われば HAL が消すので、その掃除は要りません。
 
-名前は `VOXRACK monitor <pid>.<連番>` で（HAL の一覧は破棄より少し遅れて更新されるので、次を作る前に前のが一覧から消えるのを最大 200 ms 待ち、同じ名前を二つ作らない）、UID は `local.nil.voxrack.monitor.<pid>.<UUID>` です。デバイスの一覧には出しません（名前の接頭辞で除きます）。残骸を消す処理は、公開にしないので入れていません。
+名前は `WIREVOX monitor <pid>.<連番>` で（HAL の一覧は破棄より少し遅れて更新されるので、次を作る前に前のが一覧から消えるのを最大 200 ms 待ち、同じ名前を二つ作らない）、UID は `local.nil.wirevox.monitor.<pid>.<UUID>` です。デバイスの一覧には出しません（名前の接頭辞で除きます）。この合成デバイスは作ったプロセス専用（private）で、プロセスが終われば HAL が消すので、残骸を掃除する処理は入れていません。
 
 作った後に、JUCE が一覧に載せたか（名前を開けるか）を確かめます。載っていないまま名前で開くと、JUCE は出力のない入力専用デバイスを作ってしまうからです。
 
@@ -199,7 +212,7 @@ JUCE の CoreAudio デバイスは、入力 1 台と出力 1 台を 1 つの合�
 実機で、合成デバイスが作れて、使えることを、音を出さずに確かめます。
 
 ```sh
-APP=build/MicFxHost_artefacts/Release/VOXRACK.app/Contents/MacOS/VOXRACK
+APP=build/Wirevox_artefacts/Release/WIREVOX.app/Contents/MacOS/WIREVOX
 "$APP" --probe-monitor "fxhost out" "Discrete4_Pro_SC"
 ```
 
@@ -226,22 +239,22 @@ APP=build/MicFxHost_artefacts/Release/VOXRACK.app/Contents/MacOS/VOXRACK
 
 です（使用率 1.0 では 137 サンプル = 3.107 ms）。入力と出力でレートが違うと、これにドリフト補正（高品質のレート変換）が足す分が加わりますが、今回の方法では測れませんでした。さらにバッファを小さくすると床は下がりますが、プラグインの最大処理時間（この Mac の BBD-Chorus は 32 サンプル（0.73 ms）のバッファに対して約 2 ms かかる瞬間がある）に当たります。これを超えて下げるには、Loopback を通さずアプリ自身が時計を持つ仮想マイクのドライバ（システムへのインストールが必要）にして、合成デバイスと Loopback の 768 サンプルを取り除く必要があります。このリポジトリでは作りません。
 
-プロダクト名は `CMakeLists.txt` の `MFX_PRODUCT_NAME` ひとつで決まります（`.app` の名前、ウィンドウタイトル、設定フォルダ、バンドル ID `local.nil.voxrack`）。バンドル ID が変わったため、旧 mic-fx-host から移ると、マイクの許可を macOS がもう一度確認します。
+プロダクト名は `CMakeLists.txt` の `MFX_PRODUCT_NAME` ひとつで決まります（`.app` の名前、ウィンドウタイトル、設定フォルダ、バンドル ID `local.nil.wirevox`）。バンドル ID が変わったため、旧名（VOXRACK、mic-fx-host）から移ると、マイクの許可を macOS がもう一度確認します。
 
 マイクへのアクセスは初回に macOS が確認します。許可しないと入力は無音になります。
 
-設定（デバイス、チェーン、各プラグインの状態、バイパス、仮想デバイスの実測結果、モニター出力の選択）は `~/Library/Application Support/VOXRACK/settings.xml` に保存し、次回起動時に復元します。旧名 mic-fx-host の `~/Library/Application Support/mic-fx-host/settings.xml` があって新しいファイルがまだ無いときは、起動時に一度だけ写しを作って引き継ぎます（旧フォルダには触りません）。`--settings <file>` を付けると、そのファイルを設定として使い、引き継ぎもしません（見た目の確認など、実際の設定に触れたくないとき用）。このときに限り二つ目の VOXRACK を起動できますが、`..` やシンボリックリンクを通っていても、指すファイルが実際の設定なら二つ目は起動できません。読み込めないプラグインは赤字の行で残り、状態は失われません。
+設定（デバイス、チェーン、各プラグインの状態、バイパス、仮想デバイスの実測結果、モニター出力の選択）は `~/Library/Application Support/WIREVOX/settings.xml` に保存し、次回起動時に復元します。新しいファイルがまだ無いときは、旧名の設定を新しい順に探し、最初に見つかったものの写しを起動時に一度だけ作って引き継ぎます。探す場所は、旧名 VOXRACK の `~/Library/Application Support/VOXRACK/settings.xml`、その次に旧名 mic-fx-host の `~/Library/Application Support/mic-fx-host/settings.xml` です（旧フォルダには触りません）。`--settings <file>` を付けると、そのファイルを設定として使い、引き継ぎもしません（見た目の確認など、実際の設定に触れたくないとき用）。このときに限り二つ目の WIREVOX を起動できますが、`..` やシンボリックリンクを通っていても、指すファイルが実際の設定なら二つ目は起動できません。読み込めないプラグインは赤字の行で残り、状態は失われません。
 
 設定ファイルが壊れていて読めないときは、上書きする前に同じフォルダの `settings.unreadable.xml` へ写しを残します。プラグインの読み込み中にアプリごと落ちた場合、次の起動ではチェーンを読み込まず、元の設定を `settings.crashed.xml` に残します。
 
 ## 動作確認
 
 ```sh
-APP=build/MicFxHost_artefacts/Release/VOXRACK.app/Contents/MacOS/VOXRACK
+APP=build/Wirevox_artefacts/Release/WIREVOX.app/Contents/MacOS/WIREVOX
 
 "$APP" --list-devices                          # 入出力デバイス名を表示して終了
 "$APP" --selftest "/Library/Audio/Plug-Ins/VST3/TDR Nova.vst3"
-"$APP" --selftest-settings                     # 旧フォルダからの設定の引き継ぎを一時フォルダで確認
+"$APP" --selftest-settings                     # 旧フォルダ（VOXRACK、mic-fx-host）からの設定の引き継ぎを一時フォルダで確認
 "$APP" --selftest-correlate                     # 遅延の推定が小数サンプルまで合うか
 "$APP" --selftest-chain                         # バイパスしたスロットの遅延・CPU・状態、切り替え中に音が欠けないか
 "$APP" --selftest-sweep                         # 総当たりの最速選び
@@ -250,12 +263,12 @@ APP=build/MicFxHost_artefacts/Release/VOXRACK.app/Contents/MacOS/VOXRACK
 "$APP" --selftest-breakdown                     # 遅延の内訳の計算、最大の行、実測した超過分の保存と復元（デバイス・レートが変わると未計測に戻る）
 "$APP" --selftest-processtime                   # プラグインごとの処理時間の集計、ここが重いの判定、素通しの小さな処理が経路を壊さないこと
 "$APP" --selftest-monitor                       # モニター出力の設定の保存と復元、チャンネルの割り当て、モニターの組への複製、失敗時のメイン出力だけへの退避
-(cd build && ctest)                            # 上の確認をまとめて実行
+(cd build && ctest)                            # 上の確認をまとめて実行（--selftest のプラグイン分は、プラグインが入っているときだけ）
 ```
 
 `--selftest` はウィンドウもオーディオデバイスも使わず、GUI と同じ `Chain` とグラフでプラグインを読み込み、48 kHz・64 サンプルのブロックで 3 秒処理します。プラグイン名、報告された遅延、出力のピーク、無音でないか、バイパス時にモノ入力が左右に届くか、チェーンを XML にして復元したときに同じになるかを確認します。成功で終了コード 0、読み込み失敗などで 0 以外です。
 
-`--selftest-settings` は一時フォルダの中だけで、旧設定が新しい場所へ写されること、旧ファイルが残ること、新しいファイルが既にあれば上書きしないことを確認します。
+`--selftest-settings` は一時フォルダの中だけで、旧設定（VOXRACK、mic-fx-host の順）が新しい場所へ写されること、両方あれば VOXRACK が優先されること、旧ファイルが残ること、新しいファイルが既にあれば上書きしないことを確認します。
 
 `--selftest-engine` と `--selftest-timing` はデバイスを開きません。前者は CoreAudio の代わりに偽のデバイス層（`src/FakeAudioDevice.h`）を差し込み、MIN LATENCY の完了・中止・失敗・デバイスの切り替え、その間に書かれる設定、`ScopedSetup` の復元、子プロセスを探索の途中で kill した場合を確かめます。後者は 48 kHz・64 サンプルのホストと録音側のバッファの作り物の時刻で、遅延の計算（サイクルの突き合わせ、録音側の床の符号、1 バッファのずれ）を確かめます。
 
@@ -268,3 +281,9 @@ ctest に載せるプラグインは `-DMFX_TEST_PLUGINS="パス1;パス2"` で�
 ## 範囲外
 
 メニューバー常駐、プラグインの一括スキャン、プリセット UI、公証、AU ホスティングは入れていません（VST3 のみ）。
+
+## ライセンス
+
+WIREVOX 自身のソースコードは MIT ライセンスです（`LICENSE`）。
+
+ただし、WIREVOX は JUCE（`JUCE/`、AGPLv3 または JUCE の商用ライセンス）をリンクします。ビルドした実行ファイルを配布する場合は、AGPLv3 に従うか、JUCE の商用ライセンスを持っている必要があります。このリポジトリはバイナリを配布しません。自分でビルドして自分で使う場合の扱いは、JUCE のライセンスを確認してください。

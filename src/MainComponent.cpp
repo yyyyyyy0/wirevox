@@ -316,7 +316,20 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     addChildComponent (*overlay);
 
     if (migration == Migration::failed)
-        showStatus (ja ("以前の設定を引き継げませんでした: ") + legacySettingsFile (File::getSpecialLocation (File::userHomeDirectory)).getFullPathName());
+    {
+        File source;
+
+        for (auto& candidate : legacySettingsFiles (File::getSpecialLocation (File::userHomeDirectory)))
+        {
+            if (candidate.existsAsFile())
+            {
+                source = candidate;
+                break;
+            }
+        }
+
+        showStatus (ja ("以前の設定を引き継げませんでした: ") + source.getFullPathName());
+    }
     else if (skippedChainAfterCrash)
         showStatus (ja ("前回は読み込み中に終了したため、チェーンを読み込んでいません（元の設定: settings.crashed.xml）"));
     else if (! restoreProblems.isEmpty())
