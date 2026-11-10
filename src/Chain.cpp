@@ -1,6 +1,7 @@
 #include "Chain.h"
 
 #include <optional>
+#include <vector>
 
 namespace mfx
 {
@@ -206,15 +207,19 @@ void Chain::rewire()
         signal.right = NodeAndChannel { inputNode->nodeID, numIn > 1 ? 1 : 0 };
     }
 
+    // An unconnected node would still be processed, so it is also suspended (the graph then only
+    // clears its buffer). Resuming starts from a clean state instead of stale delay lines.
+    // The graph clears the buffer of a suspended node even while the running render sequence still
+    // connects it, which would silence the signal for as long as this function takes. So a node that
+    // leaves the path is suspended only after the rebuilt sequence has replaced the running one.
+    std::vector<AudioProcessor*> toSuspend;
+
     for (auto& slot : slots)
     {
         if (slot.node == nullptr)
             continue;
 
         auto& processor = *slot.node->getProcessor();
-
-        // An unconnected node would still be processed, so it is also suspended (the graph then only
-        // clears its buffer). Resuming starts from a clean state instead of stale delay lines.
         const auto inPath = ! slot.bypassed && ! forceBypassAll;
 
         if (inPath && processor.isSuspended())
@@ -225,7 +230,7 @@ void Chain::rewire()
         }
         else if (! inPath && ! processor.isSuspended())
         {
-            processor.suspendProcessing (true);
+            toSuspend.push_back (&processor);
         }
 
         if (! inPath)
@@ -259,6 +264,9 @@ void Chain::rewire()
         graph.addConnection ({ *signal.right, { outputNode->nodeID, 1 } }, Update::none);
 
     graph.rebuild();
+
+    for (auto* processor : toSuspend)
+        processor->suspendProcessing (true);
 }
 
 void Chain::audioProcessorChanged (AudioProcessor*, const ChangeDetails& details)
