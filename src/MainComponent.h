@@ -62,6 +62,10 @@ private:
     bool isBusy() const noexcept        { return tuner.isRunning() || measureSession != nullptr; }
     void updateBusyState();
     void persist();
+    void applyMonitor (bool deviceChanged = false);
+    void refreshMonitorControls();
+    void serviceMonitor();
+    void fillMonitorPairs (const String& deviceName, int firstChannel);
 
     void timerCallback() override;
     void changeListenerCallback (ChangeBroadcaster*) override;
@@ -78,6 +82,8 @@ private:
 
     AudioDeviceSelectorComponent deviceSelector;
     Viewport deviceViewport;
+    ToggleButton monitorToggle { ja ("モニター出力") };
+    ComboBox monitorDevice, monitorPair;
     TextButton addButton { ja ("プラグインを追加...") };
     TextButton minLatencyButton { "MIN LATENCY" };
     Label dropHint { {}, ja (".vst3 をこのウィンドウにドロップしても追加できます") };

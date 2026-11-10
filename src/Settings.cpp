@@ -131,6 +131,35 @@ void writeExcess (XmlElement& root, const ExcessRecord& record)
     element->setAttribute ("measuredAt", record.measuredAt.toISO8601 (true));
 }
 
+MonitorPlan readMonitor (const XmlElement& root)
+{
+    MonitorPlan plan;
+    const auto* element = root.getChildByName ("MONITOR");
+
+    if (element == nullptr)
+        return plan;
+
+    plan.device = element->getStringAttribute ("device");
+
+    // Digits only, so a negative, fractional or unreadable channel reads as damaged rather than as 0.
+    const auto channel = element->getStringAttribute ("firstChannel").trim();
+    const auto readable = channel.isNotEmpty() && channel.length() <= 4 && channel.containsOnly ("0123456789");
+
+    if (readable)
+        plan.firstChannel = channel.getIntValue();
+
+    plan.enabled = element->getBoolAttribute ("enabled", false) && plan.device.isNotEmpty() && readable;
+    return plan;
+}
+
+void writeMonitor (XmlElement& root, const MonitorPlan& plan)
+{
+    auto* element = root.createNewChildElement ("MONITOR");
+    element->setAttribute ("enabled", plan.enabled ? 1 : 0);
+    element->setAttribute ("device", plan.device);
+    element->setAttribute ("firstChannel", plan.firstChannel);
+}
+
 std::unique_ptr<XmlElement> buildSettingsXml (const String& themeId, const Engine& engine)
 {
     auto root = std::make_unique<XmlElement> ("MIC_FX_HOST");
@@ -146,6 +175,10 @@ std::unique_ptr<XmlElement> buildSettingsXml (const String& themeId, const Engin
 
     if (const auto excess = engine.getExcess())
         writeExcess (*root, *excess);
+
+    // Nothing is written for a monitor that was never chosen, so a file stays as old tools expect it.
+    if (const auto monitor = engine.getMonitorPlan(); monitor.enabled || monitor.device.isNotEmpty())
+        writeMonitor (*root, monitor);
 
     root->addChildElement (engine.chain.toXml().release());
     return root;

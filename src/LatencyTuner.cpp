@@ -62,6 +62,9 @@ void LatencyTuner::start()
 
     originalSetup = engine.deviceManager.getAudioDeviceSetup();
     original = engine.getExperiments();
+    originalMonitor = engine.getMonitorPlan();
+    monitorWasActive = engine.isMonitorActive();
+    monitorDropped = false;
     usages = { 0.75f, 0.5f, 0.35f, 0.25f };
     usageIndex = 0;
     lastCleanIndex = -1;
@@ -80,6 +83,7 @@ void LatencyTuner::cancel()
 
 void LatencyTuner::beginStep()
 {
+    monitorDropped = false;
     const auto confirming = phase == Phase::confirmBuffer || phase == Phase::confirmUsage;
     const auto suffix = confirming ? ja (" を長めに確認中") : ja (" を確認中");
 
@@ -92,6 +96,14 @@ void LatencyTuner::beginStep()
         {
             finish (ja ("バッファサイズを変更できませんでした。元の設定に戻しました"), Outcome::restore);
             return;
+        }
+
+        // A size the monitor's aggregate cannot open makes the engine drop the monitor. That size is not clean
+        // for this setup, and the saved choice is put back so the next step tries the monitor again.
+        if (monitorWasActive && ! engine.isMonitorActive())
+        {
+            monitorDropped = true;
+            engine.setMonitorPlan (originalMonitor, false);
         }
 
         progress = ja ("バッファ ") + String (sizes[index]) + suffix;
@@ -111,6 +123,9 @@ void LatencyTuner::beginStep()
 
 bool LatencyTuner::stepIsClean() const
 {
+    if (monitorDropped)
+        return false;
+
     Reading reading;
 
     if (reader)
@@ -279,6 +294,10 @@ void LatencyTuner::finish (const String& reason, Outcome outcome)
 {
     String text = reason;
 
+    // The saved monitor choice is back before the final open, which makes a new device for it if it is needed.
+    if (monitorWasActive && outcome != Outcome::abandon)
+        engine.setMonitorPlan (originalMonitor, false);
+
     if (outcome == Outcome::settle)
     {
         auto setup = originalSetup;
@@ -311,6 +330,12 @@ void LatencyTuner::finish (const String& reason, Outcome outcome)
     {
         text = ja ("最小遅延: バッファ ") + String (sizes[lastCleanIndex]);
         text << (lastCleanUsageIndex >= 0 ? ja (" / サイクル使用率 ") + String (usages[lastCleanUsageIndex], 2) : ja (" / サイクル使用率は既定のまま"));
+    }
+
+    if (monitorWasActive && outcome != Outcome::abandon && ! engine.isMonitorActive())
+    {
+        const auto problem = engine.takeMonitorProblem();
+        text << " / " << (problem.isNotEmpty() ? problem : ja ("モニターは止まったままです"));
     }
 
     engine.releasePersistedAudio();

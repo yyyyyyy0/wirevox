@@ -127,4 +127,13 @@ SideSums sumSides (const Breakdown& breakdown)
     return sums;
 }
 
+int declareMonitorPath (const Breakdown& breakdown, const hal::Numbers& monitorDevice, int bufferSize, double cycleUsage)
+{
+    const auto usage = cycleUsage > 0.0 && cycleUsage <= 1.0 ? cycleUsage : 1.0;
+    const auto sides = sumSides (breakdown);
+
+    return sides.input + sides.plugins + (int) std::lround ((double) bufferSize * usage)
+         + monitorDevice.outputSafety + monitorDevice.outputLatency + monitorDevice.outputStreamLatency;
+}
+
 } // namespace mfx

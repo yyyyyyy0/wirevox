@@ -8,7 +8,7 @@
 namespace mfx
 {
 
-String describeRateMismatch (double runningRate, double inputRate, double outputRate)
+String describeRateMismatch (double runningRate, double inputRate, double outputRate, double monitorRate)
 {
     const auto differs = [runningRate] (double rate) { return rate > 0.0 && runningRate > 0.0 && std::abs (rate - runningRate) > 0.5; };
     StringArray parts;
@@ -18,6 +18,9 @@ String describeRateMismatch (double runningRate, double inputRate, double output
 
     if (differs (outputRate))
         parts.add (ja ("出力デバイスのレートは ") + String (outputRate, 0) + ja (" Hz で、アプリは ") + String (runningRate, 0) + ja (" Hz で動いています"));
+
+    if (differs (monitorRate))
+        parts.add (ja ("モニター機器のレートは ") + String (monitorRate, 0) + ja (" Hz で、アプリは ") + String (runningRate, 0) + ja (" Hz で動いています"));
 
     return parts.isEmpty() ? String() : parts.joinIntoString (" / ") + ja ("。レート変換が入り、遅延と負荷が増えます");
 }
@@ -30,9 +33,12 @@ std::optional<float> validCycleUsage (double value)
     return (float) value;
 }
 
-Engine::Engine()
+Engine::Engine (bool useCoreAudio)
 {
     addDefaultFormatsToManager (formats);
+
+    if (useCoreAudio)
+        useDeviceType (std::unique_ptr<AudioIODeviceType> (AudioIODeviceType::createAudioIODeviceType_CoreAudio()), makeHalMonitorBackend());
 }
 
 Engine::~Engine()
@@ -47,14 +53,48 @@ Engine::~Engine()
     deviceManager.closeAudioDevice();
 }
 
+void Engine::useDeviceType (std::unique_ptr<AudioIODeviceType> inner, std::unique_ptr<MonitorBackend> backend)
+{
+    jassert (monitorType == nullptr);
+
+    auto type = std::make_unique<MonitorDeviceType> (std::move (inner), std::move (backend));
+    monitorType = type.get();
+    deviceManager.addAudioDeviceType (std::move (type));
+}
+
 void Engine::openDevices (const XmlElement* deviceSetup)
 {
     const XmlElement noDevice ("DEVICESETUP");
-    deviceManager.initialise (1, 2, deviceSetup != nullptr ? deviceSetup : &noDevice, false);
+    const auto setup = deviceSetup != nullptr ? deviceSetup : &noDevice;
+    deviceManager.initialise (1, 2, setup, false);
+
+    // A device that failed to open with the monitor is gone; the same setup is tried again without it.
+    if (fallBackFromOpenFailure())
+        deviceManager.initialise (1, 2, setup, false);
+}
+
+// True when the last open failed while the monitor was in use. The monitor is then turned off with the error
+// as the reason, so the caller can open the main output alone.
+bool Engine::fallBackFromOpenFailure()
+{
+    if (monitorType == nullptr)
+        return false;
+
+    const auto error = monitorType->takeOpenFailure();
+
+    if (error.isEmpty())
+        return false;
+
+    monitorType->abandonMonitor (ja ("モニターを使えません（デバイスを開けませんでした: ") + error + ja ("）。メイン出力だけで続けます"));
+    return true;
 }
 
 void Engine::openFromSettings (const XmlElement* settingsRoot)
 {
+    // The plan is in place before the first device is created, which is where it is acted on.
+    if (settingsRoot != nullptr && monitorType != nullptr)
+        monitorType->setPlan (readMonitor (*settingsRoot));
+
     openDevices (settingsRoot != nullptr ? settingsRoot->getChildByName ("DEVICESETUP") : nullptr);
 
     if (settingsRoot != nullptr && settingsRoot->hasAttribute ("cycleUsage"))
@@ -80,6 +120,7 @@ void Engine::refreshHal()
     {
         overloads.reset();
         aggregate = kAudioObjectUnknown;
+        mainOutput = monitorOutput = kAudioObjectUnknown;
         seenStartCount = 0;
         deviceRates = {};
         return;
@@ -101,7 +142,16 @@ void Engine::refreshHal()
     seenStartCount = startCount;
     aggregate = hal::findJuceAggregate();
     const auto setup = deviceManager.getAudioDeviceSetup();
-    deviceRates = { nominalRateOf (setup.inputDeviceName, true), nominalRateOf (setup.outputDeviceName, false) };
+    mainOutput = monitorOutput = kAudioObjectUnknown;
+
+    if (isMonitorActive())
+    {
+        mainOutput = hal::findDevice (setup.outputDeviceName, false, true);
+        monitorOutput = hal::findDevice (monitorType->getPlan().device, false, true);
+    }
+
+    deviceRates = { nominalRateOf (setup.inputDeviceName, true), nominalRateOf (setup.outputDeviceName, false),
+                    monitorOutput != kAudioObjectUnknown ? hal::readNumbers (monitorOutput).nominalRate : 0.0 };
     overloads.reset();
 
     if (aggregate != kAudioObjectUnknown)
@@ -111,6 +161,30 @@ void Engine::refreshHal()
         overloads = std::make_unique<hal::OverloadListener> (std::move (watched));
         applyExperiments();
     }
+}
+
+hal::Numbers Engine::getAggregateNumbers() const
+{
+    if (aggregate == kAudioObjectUnknown)
+        return {};
+
+    auto numbers = hal::readNumbers (aggregate);
+
+    if (mainOutput != kAudioObjectUnknown)
+    {
+        const auto own = hal::readNumbers (mainOutput);
+        numbers.outputLatency = own.outputLatency;
+        numbers.outputSafety = own.outputSafety;
+        numbers.outputStreamLatency = own.outputStreamLatency;
+        numbers.outputChannels = own.outputChannels;
+    }
+
+    return numbers;
+}
+
+hal::Numbers Engine::getMonitorNumbers() const
+{
+    return monitorOutput != kAudioObjectUnknown ? hal::readNumbers (monitorOutput) : hal::Numbers {};
 }
 
 void Engine::setExperiments (const Experiments& next)
@@ -174,7 +248,16 @@ int Engine::setBufferSize (int frames)
 
 int Engine::openWithSetup (const AudioDeviceManager::AudioDeviceSetup& setup, bool recordAsChosen)
 {
-    const auto failed = deviceManager.setAudioDeviceSetup (setup, recordAsChosen).isNotEmpty();
+    // A monitor that is wanted but was dropped (a size it could not open) needs a new device object to be
+    // tried again, and one that is running but no longer wanted needs one to be removed.
+    if (monitorNeedsReopen())
+        deviceManager.closeAudioDevice();
+
+    auto failed = deviceManager.setAudioDeviceSetup (setup, recordAsChosen).isNotEmpty();
+
+    if (fallBackFromOpenFailure())
+        failed = deviceManager.setAudioDeviceSetup (setup, recordAsChosen).isNotEmpty();
+
     refreshHal();
 
     auto* device = deviceManager.getCurrentAudioDevice();
@@ -224,9 +307,107 @@ double Engine::nominalRateOf (const String& deviceName, bool input)
     return id != kAudioObjectUnknown ? hal::readNumbers (id).nominalRate : 0.0;
 }
 
+//==============================================================================
+MonitorPlan Engine::getMonitorPlan() const
+{
+    return monitorType != nullptr ? monitorType->getPlan() : MonitorPlan {};
+}
+
+bool Engine::isMonitorActive() const
+{
+    return monitorType != nullptr && monitorType->isActive() && deviceManager.getCurrentAudioDevice() != nullptr;
+}
+
+String Engine::takeMonitorProblem()
+{
+    return monitorType != nullptr ? monitorType->takeProblem() : String();
+}
+
+StringArray Engine::getMonitorCandidates() const
+{
+    return monitorType != nullptr ? monitorType->getUsableOutputNames() : StringArray();
+}
+
+int Engine::countMonitorChannels (const String& deviceName) const
+{
+    return monitorType != nullptr ? monitorType->countOutputChannels (deviceName) : 0;
+}
+
+bool Engine::monitorNeedsReopen() const
+{
+    if (monitorType == nullptr || deviceManager.getCurrentAudioDevice() == nullptr)
+        return false;
+
+    const auto plan = monitorType->getPlan();
+    return (plan.enabled && ! monitorType->isActive() && ! monitorType->isWaiting()) || (! plan.enabled && monitorType->isActive());
+}
+
+void Engine::setMonitorPlan (const MonitorPlan& plan, bool reopen)
+{
+    if (monitorType == nullptr)
+        return;
+
+    const auto before = monitorType->getPlan();
+    const auto wasActive = monitorType->isActive();
+    monitorType->setPlan (plan);
+
+    if (reopen && deviceManager.getCurrentAudioDevice() != nullptr && (plan.enabled != wasActive || (plan.enabled && plan != before)))
+        reopenDevice();
+}
+
+bool Engine::checkMonitor()
+{
+    if (monitorType == nullptr || ! monitorType->isActive() || monitorType->isMonitorDevicePresent())
+        return false;
+
+    monitorType->suspendMonitor (ja ("モニター機器が見つからなくなりました。メイン出力だけで続けます。機器が戻ったら自動で試します"));
+    reopenDevice();
+    return true;
+}
+
+bool Engine::retryMonitor()
+{
+    if (monitorType == nullptr || deviceManager.getCurrentAudioDevice() == nullptr || ! monitorType->consumeRetry())
+        return false;
+
+    reopenDevice();
+    return true;
+}
+
+bool Engine::serviceMonitor()
+{
+    const auto recovered = recoverMonitorFailure();
+    const auto lost = checkMonitor();
+    const auto retried = retryMonitor();
+    return recovered || lost || retried;
+}
+
+bool Engine::recoverMonitorFailure()
+{
+    if (monitorType == nullptr || deviceManager.getCurrentAudioDevice() != nullptr || ! fallBackFromOpenFailure())
+        return false;
+
+    // JUCE forgot the device names when the open failed; its saved state still has them.
+    if (const auto state = deviceManager.createStateXml())
+        deviceManager.initialise (1, 2, state.get(), false);
+
+    refreshHal();
+    return true;
+}
+
+// A different device layout needs a new device object, which JUCE only makes when the device is closed first
+// (the same setup on an open device is a no-op).
+void Engine::reopenDevice()
+{
+    const auto setup = deviceManager.getAudioDeviceSetup();
+    deviceManager.closeAudioDevice();
+    openWithSetup (setup);
+}
+
+//==============================================================================
 ScopedSetup::ScopedSetup (Engine& e)
     : engine (e), saved (e.deviceManager.getAudioDeviceSetup()),
-      hadDevice (e.deviceManager.getCurrentAudioDevice() != nullptr), experiments (e.getExperiments())
+      hadDevice (e.deviceManager.getCurrentAudioDevice() != nullptr), experiments (e.getExperiments()), monitor (e.getMonitorPlan())
 {
 }
 
@@ -235,6 +416,9 @@ ScopedSetup::~ScopedSetup()
     engine.callback.setInjecting (false);
     engine.chain.setForceBypassAll (false);
     engine.setExperiments (experiments);
+
+    // One reopen for both: openWithSetup makes a new device when the restored plan needs one.
+    engine.setMonitorPlan (monitor, ! hadDevice);
 
     if (hadDevice)
         engine.openWithSetup (saved);

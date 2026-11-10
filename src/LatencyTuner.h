@@ -67,6 +67,8 @@ private:
     int ticksLeft = 0, settleTicks = 0;
     String progress, result;
     Experiments original;
+    MonitorPlan originalMonitor;
+    bool monitorWasActive = false, monitorDropped = false;
     std::function<Reading()> reader;
 };
 

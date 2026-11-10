@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <thread>
 
@@ -249,17 +250,21 @@ namespace
     // An engine on the fake device layer, opened from settings the way the window does.
     struct Rig
     {
-        explicit Rig (const XmlElement& settings, const Array<int>& bufferSizes = {})
+        explicit Rig (const XmlElement& settings, const Array<int>& bufferSizes = {}, const std::function<void (test::FakeWorld&)>& prepare = {})
         {
             if (! bufferSizes.isEmpty())
                 world.bufferSizes = bufferSizes;
 
-            engine.deviceManager.addAudioDeviceType (std::make_unique<test::FakeDeviceType> (world));
+            if (prepare)
+                prepare (world);
+
+            engine.useDeviceType (std::make_unique<test::FakeDeviceType> (world), std::make_unique<test::FakeMonitorBackend> (world));
             engine.openFromSettings (&settings);
             engine.start();
         }
 
-        explicit Rig (const String& settings, const Array<int>& bufferSizes = {}) : Rig (*XmlDocument::parse (settings), bufferSizes) {}
+        explicit Rig (const String& settings, const Array<int>& bufferSizes = {}, const std::function<void (test::FakeWorld&)>& prepare = {})
+            : Rig (*XmlDocument::parse (settings), bufferSizes, prepare) {}
 
         int runningBuffer() const
         {
@@ -271,7 +276,7 @@ namespace
         bool persist() const { return saveSettings (*buildSettingsXml ("rack84", engine)); }
 
         test::FakeWorld world;
-        Engine engine;
+        Engine engine { false };
     };
 
     String readFile() { return getSettingsFile().loadFileAsString(); }
@@ -1170,6 +1175,758 @@ int selfTestBreakdown()
     folder.deleteRecursively();
 
     say (check.ok ? "SELFTEST BREAKDOWN OK" : "SELFTEST BREAKDOWN FAILED");
+    return check.ok ? 0 : 1;
+}
+
+//==============================================================================
+namespace
+{
+    // The device setup of the fake rig (FakeIn mono, FakeOut at 48 kHz, 64 samples) with a MONITOR element of the test's choosing.
+    String monitorSettings (const String& monitorElement, const String& outputChannels = "11")
+    {
+        return "<MIC_FX_HOST theme=\"rack84\"><DEVICESETUP deviceType=\"Fake\" audioOutputDeviceName=\"FakeOut\" audioInputDeviceName=\"FakeIn\""
+               " audioDeviceRate=\"48000.0\" audioDeviceBufferSize=\"64\" audioDeviceInChans=\"1\" audioDeviceOutChans=\"" + outputChannels + "\"/>"
+             + monitorElement + "<CHAIN/></MIC_FX_HOST>";
+    }
+
+    // FakeOut (the main output, 2 channels) and FakeMon (the monitor device, 8 channels: 7/8 is the last pair).
+    void monitorWorld (test::FakeWorld& world)
+    {
+        world.outputNames = { "FakeOut", "FakeMon" };
+        world.outputChannels["FakeMon"] = 8;
+    }
+
+    // Halves what passes through, so the output of a processed chain differs from the microphone.
+    class HalvingProcessor final : public AudioProcessor
+    {
+    public:
+        HalvingProcessor()
+            : AudioProcessor (BusesProperties().withInput ("In", AudioChannelSet::stereo()).withOutput ("Out", AudioChannelSet::stereo())) {}
+
+        void processBlock (juce::AudioBuffer<float>& buffer, MidiBuffer&) override  { buffer.applyGain (0.5f); }
+        using AudioProcessor::processBlock;
+
+        const String getName() const override           { return "Halving"; }
+        double getTailLengthSeconds() const override    { return 0.0; }
+        bool acceptsMidi() const override               { return false; }
+        bool producesMidi() const override              { return false; }
+        bool hasEditor() const override                 { return false; }
+        AudioProcessorEditor* createEditor() override   { return nullptr; }
+        int getNumPrograms() override                   { return 1; }
+        int getCurrentProgram() override                { return 0; }
+        void setCurrentProgram (int) override {}
+        const String getProgramName (int) override      { return {}; }
+        void changeProgramName (int, const String&) override {}
+        void prepareToPlay (double, int) override {}
+        void releaseResources() override {}
+        void getStateInformation (MemoryBlock&) override {}
+        void setStateInformation (const void*, int) override {}
+    };
+
+    bool allEqual (const std::vector<float>& block, float value)
+    {
+        return ! block.empty() && std::all_of (block.begin(), block.end(), [value] (float v) { return std::abs (v - value) < 1.0e-6f; });
+    }
+
+    bool sameBlock (const std::vector<float>& a, const std::vector<float>& b)
+    {
+        return a.size() == b.size() && std::equal (a.begin(), a.end(), b.begin());
+    }
+
+    MonitorPlan planOf (const String& element)
+    {
+        return readMonitor (*XmlDocument::parse ("<MIC_FX_HOST>" + element + "</MIC_FX_HOST>"));
+    }
+}
+
+int selfTestMonitor()
+{
+    Checker check;
+
+    //==========================================================================
+    // Settings: round trip, files from before the monitor, damaged values.
+    {
+        const XmlElement none ("MIC_FX_HOST");
+        const auto absent = readMonitor (none);
+        check (! absent.enabled && absent.device.isEmpty() && absent.firstChannel == 0, "a settings file without a MONITOR element loads as monitor off");
+
+        for (const auto& plan : { MonitorPlan { true, "Discrete4_Pro_SC", 30 }, MonitorPlan { false, "FakeMon", 4 }, MonitorPlan { true, "Dev \"quoted\" & <x>", 0 } })
+        {
+            XmlElement root ("MIC_FX_HOST");
+            writeMonitor (root, plan);
+            const auto reparsed = XmlDocument::parse (root.toString());
+            check (reparsed != nullptr && readMonitor (*reparsed) == plan, "a monitor of '" + plan.device + "' at channel " + String (plan.firstChannel) + " round-trips through the XML text");
+        }
+
+        check (planOf ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>") == MonitorPlan { true, "FakeMon", 6 }, "a good element is read as written");
+        const auto keptOff = planOf ("<MONITOR enabled=\"0\" device=\"FakeMon\" firstChannel=\"4\"/>");
+        check (! keptOff.enabled && keptOff.device == "FakeMon" && keptOff.firstChannel == 4, "an element that is off keeps its device and channel");
+
+        for (const auto* attributes : { "enabled=\"1\" device=\"\" firstChannel=\"2\"", "enabled=\"1\" firstChannel=\"2\"",
+                                        "enabled=\"1\" device=\"FakeMon\" firstChannel=\"-2\"", "enabled=\"1\" device=\"FakeMon\" firstChannel=\"abc\"",
+                                        "enabled=\"1\" device=\"FakeMon\" firstChannel=\"2.5\"", "enabled=\"1\" device=\"FakeMon\" firstChannel=\"\"",
+                                        "enabled=\"1\" device=\"FakeMon\"", "enabled=\"1\" device=\"FakeMon\" firstChannel=\"99999999999\"",
+                                        "enabled=\"nope\" device=\"FakeMon\" firstChannel=\"2\"", "device=\"FakeMon\" firstChannel=\"2\"" })
+        {
+            const auto plan = planOf (String ("<MONITOR ") + attributes + "/>");
+            check (! plan.enabled, String ("a damaged element (") + attributes + ") loads as off");
+        }
+    }
+
+    //==========================================================================
+    // Pairs and routing: pure functions of the channel layout.
+    {
+        const MonitorLayout two { 0, 2, 0, 8 };
+        check (isValidPair (two, 0) && isValidPair (two, 6) && ! isValidPair (two, 7) && ! isValidPair (two, 8) && ! isValidPair (two, -1),
+               "a pair is valid from channel 0 to the second to last, never at the last, past the end or below 0");
+        check (! isValidPair ({ 0, 2, 0, 1 }, 0) && ! isValidPair ({ 0, 2, 0, 0 }, 0) && isValidPair ({ 0, 2, 0, 2 }, 0),
+               "a monitor device with 0 or 1 output channels has no pair; one with 2 has exactly one");
+
+        BigInteger both, only1, none;
+        both.setRange (0, 2, true);
+        only1.setBit (1);
+
+        auto routing = planRouting (both, { 0, 2, 2, 4 }, 2);
+        check (routing.innerOutputs.toInteger() == 0b110011 && routing.visibleOutputs.toInteger() == 0b11, "main 1/2 and monitor 3/4 of FakeMon: the device opens channels 0, 1, 4, 5 and the callback sees 0, 1");
+        check (routing.mainSlots == std::vector<int> { 0, 1 } && routing.monitorSlots[0] == 2 && routing.monitorSlots[1] == 3, "the callback finds the main pair in slots 0 and 1 and the monitor pair in 2 and 3");
+
+        routing = planRouting (only1, { 0, 2, 2, 4 }, 0);
+        check (routing.mainSlots == std::vector<int> { 0 } && routing.monitorSlots[0] == 1 && routing.monitorSlots[1] == 2 && routing.visibleOutputs.toInteger() == 0b10,
+               "only main channel 2 active: one main slot, then the monitor pair");
+
+        routing = planRouting (none, { 0, 2, 2, 4 }, 0);
+        check (routing.mainSlots.empty() && routing.monitorSlots[0] == 0 && routing.monitorSlots[1] == 1 && routing.visibleOutputs.isZero(), "no main channel active: the monitor pair is all the device carries");
+
+        routing = planRouting (both, { 4, 2, 0, 4 }, 2);
+        check (routing.innerOutputs.toInteger() == 0b111100 && routing.monitorSlots[0] == 0 && routing.monitorSlots[1] == 1 && routing.mainSlots == std::vector<int> { 2, 3 },
+               "the aggregate with the monitor device's channels first: the monitor pair is found in slots 0 and 1, the main pair after it");
+
+        BigInteger eight, five, bad;
+        eight.setRange (0, 8, true);
+        five.setBit (5);
+        five.setBit (6);
+        routing = planRouting (eight, { 0, 8, 0, 8 }, 6);
+        check (routing.visibleOutputs.toInteger() == 0b00111111 && routing.mainSlots.size() == 6 && routing.monitorSlots[0] == 6 && routing.monitorSlots[1] == 7,
+               "on one device, a main channel that is also in the monitor pair is dropped from the main output");
+        routing = planRouting (five, { 0, 8, 0, 8 }, 6);
+        check (routing.visibleOutputs.toInteger() == 0b100000 && routing.mainSlots == std::vector<int> { 0 } && routing.monitorSlots[0] == 1 && routing.monitorSlots[1] == 2,
+               "on one device with main channels 6 and 7 wanted and the pair at 7/8: only 6 stays");
+
+        bad.setRange (0, 64, true);
+        routing = planRouting (bad, { 0, 2, 2, 4 }, 2);
+        check (routing.visibleOutputs.toInteger() == 0b11 && routing.innerOutputs.countNumberOfSetBits() == 4, "main channels beyond the main device's own are ignored");
+
+        routing = planRouting (both, { 0, 2, 2, 4 }, 3);
+        check (routing.monitorSlots[0] == -1 && routing.monitorSlots[1] == -1 && routing.innerOutputs.toInteger() == 0b11, "a pair that does not fit adds no channel at all");
+        routing = planRouting (both, { 0, 2, 2, 4 }, -1);
+        check (routing.monitorSlots[0] == -1 && routing.innerOutputs.toInteger() == 0b11, "a negative first channel adds no channel and touches no bit");
+    }
+
+    //==========================================================================
+    // The copy.
+    {
+        const int mainSlots[] = { 0, 1 }, monitorSlots[] = { 2, 3 }, mono[] = { 0 };
+        std::vector<std::vector<float>> channels (4, std::vector<float> (8, 7.0f));
+        float* pointers[] = { channels[0].data(), channels[1].data(), channels[2].data(), channels[3].data() };
+
+        std::fill (channels[0].begin(), channels[0].end(), 0.25f);
+        std::fill (channels[1].begin(), channels[1].end(), -0.5f);
+        copyToMonitor (pointers, mainSlots, 2, monitorSlots, 8);
+        check (allEqual (channels[2], 0.25f) && allEqual (channels[3], -0.5f) && allEqual (channels[0], 0.25f) && allEqual (channels[1], -0.5f), "the monitor pair gets the main pair, left to left and right to right, and the main pair is not touched");
+
+        std::fill (channels[2].begin(), channels[2].end(), 7.0f);
+        std::fill (channels[3].begin(), channels[3].end(), 7.0f);
+        copyToMonitor (pointers, mono, 1, monitorSlots, 8);
+        check (allEqual (channels[2], 0.25f) && allEqual (channels[3], 0.25f), "a mono main output goes to both monitor channels");
+
+        copyToMonitor (pointers, mainSlots, 0, monitorSlots, 8);
+        check (allEqual (channels[2], 0.0f) && allEqual (channels[3], 0.0f), "no main channel: the monitor is silent, not left with whatever the buffer held");
+
+        std::fill (channels[2].begin(), channels[2].end(), 7.0f);
+        const int absent[] = { -1, -1 };
+        copyToMonitor (pointers, mainSlots, 2, absent, 8);
+        copyToMonitor (pointers, mainSlots, 2, monitorSlots, 0);
+        check (allEqual (channels[2], 7.0f), "no monitor slot, or no samples: nothing is written");
+    }
+
+    {
+        const auto text = describeRateMismatch (48000.0, 48000.0, 48000.0, 44100.0);
+        check (text.contains ("44100") && text.contains (ja ("モニター")) && describeRateMismatch (48000.0, 48000.0, 48000.0, 48000.0).isEmpty() && describeRateMismatch (48000.0, 0.0, 0.0, 0.0).isEmpty(),
+               "a monitor device at another rate is named in the rate warning; equal or unknown rates give none");
+    }
+
+    //==========================================================================
+    // The layer is the engine's only device type from the moment it exists, so a device panel built before the
+    // first open (which asks the manager for its types) cannot make JUCE add a plain CoreAudio type next to it.
+    // This reads the system's device list (names only); nothing is opened.
+    {
+        Engine engine;
+        const auto& types = engine.deviceManager.getAvailableDeviceTypes();
+        check (types.size() == 1 && dynamic_cast<MonitorDeviceType*> (types[0]) != nullptr && types[0]->getTypeName() == "CoreAudio",
+               "a default Engine has exactly one device type, the monitor layer in front of CoreAudio, under CoreAudio's name (" + String (types.size()) + " type(s))");
+    }
+
+    //==========================================================================
+    // Off by default: nothing is made, and the device is CoreAudio's own kind of object, untouched.
+    {
+        Rig rig (monitorSettings ({}), {}, monitorWorld);
+        auto* device = rig.engine.deviceManager.getCurrentAudioDevice();
+        check (device != nullptr && dynamic_cast<test::FakeDevice*> (device) != nullptr, "with no MONITOR element the device is the layer's own, not wrapped");
+        check (rig.world.aggregatesCreated == 0 && rig.world.devicesAlive == 1 && ! rig.engine.isMonitorActive() && ! rig.engine.getMonitorPlan().enabled,
+               "no aggregate is created and one device is open");
+        check (rig.engine.takeMonitorProblem().isEmpty(), "and there is nothing to report");
+
+        const auto saved = buildSettingsXml ("rack84", rig.engine);
+        check (saved->getChildByName ("MONITOR") == nullptr, "a monitor that was never chosen is not written");
+    }
+
+    // Same, for a plan that is off in the file but names a device.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"0\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        check (rig.world.aggregatesCreated == 0 && ! rig.engine.isMonitorActive(), "a monitor that is saved as off creates nothing at launch");
+        const auto saved = buildSettingsXml ("rack84", rig.engine);
+        const auto* element = saved->getChildByName ("MONITOR");
+        check (element != nullptr && element->getStringAttribute ("device") == "FakeMon" && element->getIntAttribute ("firstChannel") == 6 && element->getIntAttribute ("enabled") == 0,
+               "and the choice is written back as it was");
+    }
+
+    //==========================================================================
+    // On: the aggregate exists, JUCE sees only the main output, everything keyed by the output name keeps the main name.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        auto& engine = rig.engine;
+        auto& manager = engine.deviceManager;
+        auto* device = manager.getCurrentAudioDevice();
+
+        check (engine.isMonitorActive() && rig.world.aggregatesCreated == 1 && rig.world.aggregatesAlive == 1, "a monitor saved as on is running after launch, on one aggregate");
+        check (device != nullptr && device->getName() == "FakeOut" && device->getTypeName() == "Fake", "the open device is called by the main output's name, and keeps the type name");
+        check (manager.getAudioDeviceSetup().outputDeviceName == "FakeOut" && manager.getAudioDeviceSetup().inputDeviceName == "FakeIn", "the device setup holds the main output's name");
+
+        const auto names = device->getOutputChannelNames();
+        check (names.size() == 2 && names[0] == "out 1" && names[1] == "out 2", "the channel list is the main device's two channels, without the aggregate's sub-device suffix");
+        check (device->getActiveOutputChannels().toInteger() == 0b11 && manager.getAudioDeviceSetup().outputChannels.toInteger() == 0b11, "the active output channels are the main output's");
+        check (device->getCurrentSampleRate() == 48000.0 && device->getCurrentBufferSizeSamples() == 64, "rate and buffer size pass through");
+
+        auto* type = manager.getCurrentDeviceTypeObject();
+        check (type != nullptr && type->getDeviceNames (false) == StringArray ("FakeOut", "FakeMon") && type->getDeviceNames (false).indexOf (device->getName()) == 0,
+               "the device list does not show the aggregate, though it exists (" + String (rig.world.outputNames.size()) + " output names in the layer)");
+        check (type != nullptr && type->getIndexOfDevice (device, false) == 0, "the type finds the open device in its list by the main name");
+
+        const auto audio = engine.getPersistedAudio();
+        check (audio.device != nullptr && audio.device->getStringAttribute ("audioOutputDeviceName") == "FakeOut" && audio.device->getStringAttribute ("audioDeviceOutChans") == "11",
+               "createStateXml (what is saved as DEVICESETUP) holds the main output's name and channels");
+
+        engine.setExcess ({ "FakeOut", 48000.0, 16.0, 6, Time::getCurrentTime() });
+        check (engine.getExcess().has_value() && engine.getExcess()->outputDevice == "FakeOut", "the measured excess, keyed by the output name and rate, still applies with the monitor on");
+
+        const auto saved = buildSettingsXml ("rack84", engine);
+        const auto* monitorElement = saved->getChildByName ("MONITOR");
+        check (monitorElement != nullptr && monitorElement->getIntAttribute ("enabled") == 1 && monitorElement->getStringAttribute ("device") == "FakeMon" && monitorElement->getIntAttribute ("firstChannel") == 6,
+               "the settings file holds the monitor choice");
+        check (saved->getChildByName ("LATENCY_EXCESS") != nullptr && saved->getChildByName ("LATENCY_EXCESS")->getStringAttribute ("outputDevice") == "FakeOut", "and the excess record under the main output's name");
+        check (! saved->toString().contains (MonitorDeviceType::aggregateNamePrefix), "the aggregate's name is nowhere in the saved settings");
+
+        // The tuner's own "device unchanged" check compares the setup's names; a whole run must not be cut short by it.
+        LatencyTuner tuner (engine);
+        setReaderUncleanAtOrBelow (tuner, rig, 32);
+        tuner.start();
+        int writes = 0;
+        bool differed = false;
+        const auto before = String();
+        const auto ended = tickToEnd (tuner, rig, before, writes, differed);
+        check (ended && tuner.getResult().startsWith (ja ("最小遅延")), "MIN LATENCY runs to its end with the monitor on (" + tuner.getResult() + ")");
+        check (rig.runningBuffer() == 64 && engine.isMonitorActive() && rig.world.devicesAlive == 1 && rig.world.aggregatesAlive == 1,
+               "and the monitor is still running on the same aggregate afterwards (buffer " + String (rig.runningBuffer()) + ", " + String (rig.world.devicesAlive) + " device, " + String (rig.world.aggregatesAlive) + " aggregate)");
+        check (rig.world.aggregatesCreated == 1, "buffer changes reopen the device, not the aggregate");
+    }
+
+    //==========================================================================
+    // The callback: the monitor carries what the main output carries.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        auto& engine = rig.engine;
+        auto* inner = rig.world.lastDevice;
+        check (inner != nullptr && engine.isMonitorActive(), "the underlying device is running");
+
+        const auto cycle = [&inner] (float mic) { return inner->pump (64, mic); };
+
+        auto out = cycle (0.25f);
+        check (out.size() == 4 && allEqual (out[0], 0.25f) && allEqual (out[1], 0.25f), "an empty chain passes the microphone to both main channels");
+        check (allEqual (out[2], 0.25f) && allEqual (out[3], 0.25f) && sameBlock (out[2], out[0]) && sameBlock (out[3], out[1]), "and the monitor pair carries the same");
+
+        engine.chain.addProcessor (std::make_unique<HalvingProcessor>(), describe ("Halving"));
+        engine.chain.rewire();
+        out = cycle (0.25f);
+        check (allEqual (out[0], 0.125f) && allEqual (out[1], 0.125f) && sameBlock (out[2], out[0]) && sameBlock (out[3], out[1]), "through a plugin the monitor carries the processed signal (0.125), not the microphone");
+
+        engine.chain.setBypassed (0, true);
+        out = cycle (0.25f);
+        check (allEqual (out[0], 0.25f) && sameBlock (out[2], out[0]) && sameBlock (out[3], out[1]), "with the slot bypassed the monitor carries what the main output carries (0.25)");
+
+        engine.chain.setBypassed (0, false);
+        engine.chain.setForceBypassAll (true);
+        out = cycle (0.25f);
+        check (allEqual (out[0], 0.25f) && allEqual (out[1], 0.25f) && sameBlock (out[2], out[0]) && sameBlock (out[3], out[1]), "with the hard bypass of a measurement the monitor carries what the main output carries");
+        engine.chain.setForceBypassAll (false);
+
+        out = cycle (0.0f);
+        check (allEqual (out[2], 0.0f) && allEqual (out[3], 0.0f), "a silent main output is a silent monitor");
+        check (std::none_of (out.begin(), out.end(), [] (const std::vector<float>& channel) { return std::any_of (channel.begin(), channel.end(), [] (float v) { return v == 7.0f; }); }),
+               "no output channel is left as the device handed it over");
+    }
+
+    // The monitor device's channels first in the aggregate.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"2\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.outputChannels["FakeMon"] = 4;
+            world.monitorBeforeMain = true;
+        });
+        auto out = rig.world.lastDevice->pump (64, 0.5f);
+        check (rig.engine.isMonitorActive() && out.size() == 4 && allEqual (out[0], 0.5f) && allEqual (out[1], 0.5f) && allEqual (out[2], 0.5f) && allEqual (out[3], 0.5f),
+               "when the aggregate lists the monitor device first, the copy still lands on the monitor pair and the main pair is the one processed");
+    }
+
+    // Channel counts: mono main, no main channel, one device.
+    {
+        Rig mono (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"0\"/>", "1"), {}, monitorWorld);
+        auto out = mono.world.lastDevice->pump (64, 0.25f);
+        check (mono.engine.isMonitorActive() && out.size() == 3 && allEqual (out[0], 0.25f) && allEqual (out[1], 0.25f) && allEqual (out[2], 0.25f),
+               "one main channel active: it is copied to both monitor channels");
+
+        Rig silent (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"0\"/>", "0"), {}, monitorWorld);
+        out = silent.world.lastDevice->pump (64, 0.25f);
+        check (silent.engine.isMonitorActive() && out.size() == 2 && allEqual (out[0], 0.0f) && allEqual (out[1], 0.0f), "no main channel active: the monitor is silent");
+
+        Rig same (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeOut\" firstChannel=\"6\"/>", "111111"), {}, [] (test::FakeWorld& world)
+        {
+            world.outputChannels["FakeOut"] = 8;
+        });
+        auto* device = same.engine.deviceManager.getCurrentAudioDevice();
+        out = same.world.lastDevice->pump (64, 0.25f);
+        check (same.engine.isMonitorActive() && same.world.aggregatesCreated == 0 && same.world.devicesAlive == 1, "the monitor on the main device itself makes no aggregate");
+        check (out.size() == 8 && allEqual (out[0], 0.25f) && allEqual (out[6], 0.25f) && allEqual (out[7], 0.25f),
+               "and the pair 7/8 of that device carries the main output");
+        check (device->getActiveOutputChannels().toInteger() == 0b00111111 && same.engine.deviceManager.getAudioDeviceSetup().outputChannels.toInteger() == 0b00111111,
+               "the main channels are the user's (" + String (device->getActiveOutputChannels().toInteger()) + ")");
+        check (device->getOutputChannelNames()[6].endsWith (ja ("[モニター]")) && device->getOutputChannelNames()[7].endsWith (ja ("[モニター]")) && device->getOutputChannelNames().size() == 8,
+               "the channel list says which two channels are the monitor's");
+
+        // A pair that overlaps the user's main channels is refused; their channel choice is never narrowed.
+        Rig overlap (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeOut\" firstChannel=\"6\"/>", "11111111"), {}, [] (test::FakeWorld& world)
+        {
+            world.outputChannels["FakeOut"] = 8;
+        });
+        const auto problem = overlap.engine.takeMonitorProblem();
+        check (! overlap.engine.isMonitorActive() && ! overlap.engine.getMonitorPlan().enabled && problem.contains (ja ("重なって")) && overlap.engine.takeMonitorProblem().isEmpty(),
+               "an overlapping pair on one device leaves the monitor off, with the reason once (" + problem + ")");
+        const auto kept = overlap.engine.getPersistedAudio();
+        check (overlap.engine.deviceManager.getCurrentAudioDevice() != nullptr && kept.device != nullptr && kept.device->getStringAttribute ("audioDeviceOutChans") == "11111111",
+               "and the main output opens with all eight channels, as saved");
+    }
+
+    //==========================================================================
+    // Turning it on and off at run time, and what is created and destroyed.
+    {
+        Rig rig (monitorSettings ({}), {}, monitorWorld);
+        auto& engine = rig.engine;
+
+        engine.setMonitorPlan ({ true, "FakeMon", 6 });
+        check (engine.isMonitorActive() && rig.world.aggregatesCreated == 1 && rig.world.aggregatesAlive == 1 && rig.world.devicesAlive == 1,
+               "turning it on creates one aggregate and reopens the device on it (one device is open, the old one is gone)");
+        check (engine.getMonitorPlan() == MonitorPlan { true, "FakeMon", 6 }, "the plan reads back as set");
+
+        const auto opens = rig.world.opens;
+        engine.setMonitorPlan ({ true, "FakeMon", 6 });
+        check (rig.world.opens == opens && rig.world.aggregatesCreated == 1, "setting the same plan again changes nothing");
+
+        engine.setMonitorPlan ({ true, "FakeMon", 4 });
+        check (engine.isMonitorActive() && rig.world.aggregatesCreated == 2 && rig.world.aggregatesAlive == 1, "another pair replaces the aggregate rather than adding one");
+
+        engine.setMonitorPlan ({ false, "FakeMon", 4 });
+        check (! engine.isMonitorActive() && rig.world.aggregatesAlive == 0 && rig.world.devicesAlive == 1 && dynamic_cast<test::FakeDevice*> (engine.deviceManager.getCurrentAudioDevice()) != nullptr,
+               "turning it off destroys the aggregate and leaves the plain device");
+        check (engine.getMonitorPlan() == MonitorPlan { false, "FakeMon", 4 }, "and the choice is kept");
+
+        engine.setMonitorPlan ({ true, "FakeMon", 6 });
+        check (rig.world.aggregatesAlive == 1, "on again");
+        engine.deviceManager.closeAudioDevice();
+        check (rig.world.aggregatesAlive == 0 && rig.world.devicesAlive == 0, "closing the device, which is what quitting does, destroys the aggregate");
+    }
+
+    // A device that is changed in the panel: the aggregate follows the new main output.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.outputNames.add ("FakeOut2");
+        });
+        auto setup = rig.engine.deviceManager.getAudioDeviceSetup();
+        setup.outputDeviceName = "FakeOut2";
+        const auto error = rig.engine.deviceManager.setAudioDeviceSetup (setup, true);
+        check (error.isEmpty() && rig.engine.isMonitorActive() && rig.world.aggregatesCreated == 2 && rig.world.aggregatesAlive == 1, "choosing another main output builds a new aggregate and destroys the old one");
+        check (rig.engine.deviceManager.getAudioDeviceSetup().outputDeviceName == "FakeOut2" && rig.engine.deviceManager.getCurrentAudioDevice()->getName() == "FakeOut2", "and the name is the new main output's");
+    }
+
+    //==========================================================================
+    // Failures: the main output carries on alone, the monitor is off, there is a reason, and no aggregate is left.
+    {
+        const auto fallsBack = [] (const String& description, const String& element, const std::function<void (test::FakeWorld&)>& prepare, bool keepsIntent = false)
+        {
+            Rig rig (monitorSettings (element), {}, [&prepare] (test::FakeWorld& world) { monitorWorld (world); if (prepare) prepare (world); });
+            auto& engine = rig.engine;
+            const auto plan = engine.getMonitorPlan();
+            const auto problem = engine.takeMonitorProblem();
+            auto* device = engine.deviceManager.getCurrentAudioDevice();
+
+            Checker local;
+            local (device != nullptr && device->getName() == "FakeOut" && rig.world.devicesAlive == 1, description + ": the main output is open");
+            local (! engine.isMonitorActive() && plan.enabled == keepsIntent, description + (keepsIntent ? ": the monitor waits and the choice stays on" : ": the monitor is off"));
+            local (problem.isNotEmpty() && engine.takeMonitorProblem().isEmpty(), description + ": a reason is reported, once (" + problem + ")");
+            local (rig.world.aggregatesAlive == 0, description + ": no aggregate is left");
+            local (engine.deviceManager.getAudioDeviceSetup().outputChannels.toInteger() == 0b11 && rig.runningBuffer() == 64, description + ": the device setup is as it was saved");
+
+            const auto saved = buildSettingsXml ("rack84", engine);
+            local (saved->getChildByName ("DEVICESETUP") != nullptr && saved->getChildByName ("DEVICESETUP")->getStringAttribute ("audioOutputDeviceName") == "FakeOut"
+                       && saved->getChildByName ("MONITOR") != nullptr && saved->getChildByName ("MONITOR")->getIntAttribute ("enabled") == (keepsIntent ? 1 : 0),
+                   description + (keepsIntent ? ": the next save still says on" : ": the next save says off") + " and keeps the main output");
+
+            auto out = rig.world.lastDevice != nullptr ? rig.world.lastDevice->pump (64, 0.25f) : std::vector<std::vector<float>>();
+            local (out.size() == 2 && allEqual (out[0], 0.25f) && allEqual (out[1], 0.25f), description + ": the main output still plays");
+            return local.ok;
+        };
+
+        check (fallsBack ("an unknown device", "<MONITOR enabled=\"1\" device=\"Nope\" firstChannel=\"0\"/>", {}, true), "a saved monitor device that is not there waits, and the saved choice stays on");
+        check (fallsBack ("a channel past the end", "<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"8\"/>", {}), "a first channel past the device's last falls back to off");
+        check (fallsBack ("the last channel alone", "<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"7\"/>", {}), "a pair that would start on the device's last channel falls back to off");
+        check (fallsBack ("a one-channel device", "<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"0\"/>", [] (test::FakeWorld& world) { world.outputChannels["FakeMon"] = 1; }),
+               "a monitor device with a single channel falls back to off");
+        check (fallsBack ("a refused aggregate", "<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>", [] (test::FakeWorld& world) { world.failAggregate = true; }), "an aggregate the HAL refuses falls back to off");
+        check (fallsBack ("an unlisted aggregate", "<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>", [] (test::FakeWorld& world) { world.aggregatesListed = false; }),
+               "an aggregate that JUCE's device scan does not list falls back to off, and is destroyed");
+
+        Rig damaged (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"-3\"/>"), {}, monitorWorld);
+        check (! damaged.engine.isMonitorActive() && damaged.world.aggregatesCreated == 0 && damaged.world.devicesAlive == 1
+                   && damaged.engine.takeMonitorProblem().isEmpty() && damaged.engine.deviceManager.getAudioDeviceSetup().outputDeviceName == "FakeOut",
+               "a damaged element turns nothing on and creates nothing");
+    }
+
+    // The monitor device goes away while running.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        auto& engine = rig.engine;
+        check (engine.isMonitorActive() && ! engine.checkMonitor(), "with the device there, checking leaves the monitor running");
+
+        rig.world.outputNames.removeString ("FakeMon");
+        check (engine.checkMonitor(), "the monitor device is gone: the monitor is dropped");
+        check (! engine.isMonitorActive() && engine.getMonitorPlan() == MonitorPlan { true, "FakeMon", 6 }, "it is not running and the choice is kept as on");
+        check (rig.world.aggregatesAlive == 0 && rig.world.devicesAlive == 1 && engine.deviceManager.getCurrentAudioDevice() != nullptr && engine.deviceManager.getCurrentAudioDevice()->getName() == "FakeOut",
+               "the aggregate is destroyed and the main output is open");
+        check (engine.takeMonitorProblem().isNotEmpty() && ! engine.checkMonitor(), "the reason is reported once, and a second check finds nothing to do");
+
+        check (! engine.retryMonitor() && rig.world.aggregatesCreated == 1, "a device list change with the device still away reopens nothing");
+
+        // Back again: a device list change brings the monitor back by itself.
+        rig.world.outputNames.add ("FakeMon");
+        check (engine.retryMonitor() && engine.isMonitorActive() && rig.world.aggregatesAlive == 1, "and when the device comes back the monitor is tried again and runs");
+        check (! engine.retryMonitor(), "a running monitor is left alone");
+    }
+
+    //==========================================================================
+    // The open fails after the device was made: back to the main output alone, with the error as the reason.
+    {
+        const auto limit = [] (test::FakeWorld& world) { monitorWorld (world); world.maxOpenOutputs = 2; };
+
+        Rig launch (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, limit);
+        const auto problem = launch.engine.takeMonitorProblem();
+        check (launch.engine.deviceManager.getCurrentAudioDevice() != nullptr && launch.engine.deviceManager.getCurrentAudioDevice()->getName() == "FakeOut" && launch.world.devicesAlive == 1,
+               "a monitor whose aggregate refuses to open at launch: the main output is open");
+        check (! launch.engine.isMonitorActive() && ! launch.engine.getMonitorPlan().enabled && launch.world.aggregatesAlive == 0, "the monitor is off and no aggregate is left");
+        check (problem.contains ("too many output channels") && launch.engine.takeMonitorProblem().isEmpty(), "the reason holds the error and is reported once (" + problem + ")");
+        check (launch.engine.deviceManager.getAudioDeviceSetup().outputChannels.toInteger() == 0b11 && launch.runningBuffer() == 64, "the device setup is as it was saved");
+
+        Rig live (monitorSettings ({}), {}, limit);
+        live.engine.setMonitorPlan ({ true, "FakeMon", 6 });
+        const auto liveProblem = live.engine.takeMonitorProblem();
+        auto out = live.world.lastDevice != nullptr ? live.world.lastDevice->pump (64, 0.25f) : std::vector<std::vector<float>>();
+        check (! live.engine.isMonitorActive() && ! live.engine.getMonitorPlan().enabled && liveProblem.contains ("too many output channels") && live.world.aggregatesAlive == 0,
+               "turning the monitor on at run time, with the same refusal: off, with the reason, no aggregate");
+        check (live.engine.deviceManager.getCurrentAudioDevice() != nullptr && out.size() == 2 && allEqual (out[0], 0.25f), "and the main output still plays");
+
+        // The restore of a measurement goes through the same path.
+        live.world.maxOpenOutputs = 0;
+        live.engine.setMonitorPlan ({ true, "FakeMon", 6 });
+        check (live.engine.isMonitorActive(), "the monitor is on again once the device accepts it");
+        {
+            ScopedSetup scope (live.engine);
+            live.engine.setMonitorPlan ({ false, "FakeMon", 6 });
+            live.world.maxOpenOutputs = 2;
+        }
+        check (live.engine.deviceManager.getCurrentAudioDevice() != nullptr && ! live.engine.isMonitorActive() && live.engine.takeMonitorProblem().isNotEmpty() && live.world.aggregatesAlive == 0,
+               "a refusal when a ScopedSetup puts the monitor back also ends on the main output");
+    }
+
+    //==========================================================================
+    // A device that is only absent for now does not cost the saved choice.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.outputNames.removeString ("FakeOut");      // Loopback is not running yet
+        });
+        auto& engine = rig.engine;
+        check (engine.deviceManager.getCurrentAudioDevice() == nullptr && ! engine.isMonitorActive(), "the main output is missing at launch: nothing is open");
+        const auto written = buildSettingsXml ("rack84", engine);
+        check (written->getChildByName ("MONITOR") != nullptr && written->getChildByName ("MONITOR")->getIntAttribute ("enabled") == 1
+                   && written->getChildByName ("MONITOR")->getStringAttribute ("device") == "FakeMon" && written->getChildByName ("MONITOR")->getIntAttribute ("firstChannel") == 6,
+               "the settings written meanwhile still say the monitor is on");
+
+        rig.world.outputNames.insert (0, "FakeOut");
+        AudioDeviceManager::AudioDeviceSetup setup;
+        setup.outputDeviceName = "FakeOut";
+        setup.inputDeviceName = "FakeIn";
+        setup.sampleRate = 48000.0;
+        setup.bufferSize = 64;
+        setup.inputChannels.setBit (0);
+        setup.outputChannels.setRange (0, 2, true);
+        setup.useDefaultInputChannels = setup.useDefaultOutputChannels = false;
+        engine.openWithSetup (setup);
+        check (engine.isMonitorActive() && rig.world.aggregatesAlive == 1 && engine.getMonitorPlan() == MonitorPlan { true, "FakeMon", 6 }, "when the device appears and opens, the monitor runs");
+    }
+
+    // The monitor device missing at launch: the main output opens, the choice waits, a device list change starts it.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.outputNames.removeString ("FakeMon");
+        });
+        auto& engine = rig.engine;
+        check (engine.getMonitorPlan().enabled && engine.takeMonitorProblem().isNotEmpty() && rig.world.devicesAlive == 1 && ! engine.isMonitorActive(), "an absent monitor device: main output open, choice kept, reason given");
+        const auto written = buildSettingsXml ("rack84", engine);
+        check (written->getChildByName ("MONITOR")->getIntAttribute ("enabled") == 1, "and the next save still says on");
+        const auto opens = rig.world.opens;
+        check (! engine.retryMonitor() && rig.world.opens == opens, "no retry until the device is there");
+        rig.world.outputNames.add ("FakeMon");
+        check (engine.retryMonitor() && engine.isMonitorActive() && ! engine.retryMonitor(), "once it is, one retry brings the monitor up and the next does nothing");
+    }
+
+    //==========================================================================
+    // A device the list shows but the backend cannot resolve (a duplicate name, an aggregate) is not "waiting".
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.unresolvable.insert ("FakeMon");
+        });
+        auto& engine = rig.engine;
+        const auto problem = engine.takeMonitorProblem();
+        check (! engine.isMonitorActive() && ! engine.getMonitorPlan().enabled && problem.isNotEmpty() && engine.deviceManager.getCurrentAudioDevice() != nullptr,
+               "a listed device the backend cannot resolve turns the choice off with a reason, and the main output opens (" + problem + ")");
+        check (engine.getMonitorCandidates() == StringArray ("FakeOut"), "and it is not offered as a monitor device");
+
+        const auto opens = rig.world.opens;
+
+        for (int i = 0; i < 20; ++i)
+            engine.serviceMonitor();
+
+        check (rig.world.opens == opens && rig.world.aggregatesCreated == 0, "pumping 20 change messages reopens nothing (" + String (rig.world.opens - opens) + " reopens)");
+    }
+
+    // Waiting is bounded too: a list that did not change is not looked at twice.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.outputNames.removeString ("FakeMon");
+        });
+        auto& engine = rig.engine;
+        const auto opens = rig.world.opens;
+
+        for (int i = 0; i < 20; ++i)
+            engine.serviceMonitor();
+
+        rig.world.outputNames.add ("Other");
+        for (int i = 0; i < 20; ++i)
+            engine.serviceMonitor();
+
+        check (rig.world.opens == opens && engine.getMonitorPlan().enabled, "20 change messages with the list unchanged, and 20 after an unrelated device came, reopen nothing");
+
+        rig.world.outputNames.add ("FakeMon");
+        check (engine.serviceMonitor() && engine.isMonitorActive(), "the device itself coming is the one reopen");
+
+        const auto after = rig.world.opens;
+
+        for (int i = 0; i < 20; ++i)
+            engine.serviceMonitor();
+
+        check (rig.world.opens == after && rig.world.aggregatesCreated == 1, "and then nothing more (" + String (rig.world.opens - after) + " reopens)");
+    }
+
+    //==========================================================================
+    // The HAL's list follows a destroy late: the next aggregate waits for it and has a name of its own.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.delayedRemoval = true;
+        });
+        auto& engine = rig.engine;
+        const auto aggregatesListed = [&rig]
+        {
+            int n = 0;
+
+            for (auto& name : rig.world.outputNames)
+                n += name.startsWith (MonitorDeviceType::aggregateNamePrefix) ? 1 : 0;
+
+            return n;
+        };
+
+        const auto first = rig.world.lastAggregateName;
+        engine.setMonitorPlan ({ true, "FakeMon", 4 });
+        check (engine.isMonitorActive() && rig.world.lastAggregateName != first && rig.world.settledRemovals == 1 && aggregatesListed() == 1,
+               "a pair change makes a new, differently named aggregate after the old one left the list");
+
+        engine.setMonitorPlan ({ false, "FakeMon", 4 });
+        engine.setMonitorPlan ({ true, "FakeMon", 4 });
+        check (engine.isMonitorActive() && rig.world.settledRemovals == 2 && aggregatesListed() == 1 && rig.world.aggregatesAlive == 1, "so does off and on again");
+    }
+
+    //==========================================================================
+    // MIN LATENCY with a size the aggregate cannot open: that size is not clean, and the monitor is back after.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, [] (test::FakeWorld& world)
+        {
+            monitorWorld (world);
+            world.refuseExtraOutputsBelow = 64;
+        });
+        auto& engine = rig.engine;
+        check (engine.isMonitorActive(), "the monitor runs at 64");
+
+        LatencyTuner tuner (engine);
+        setReaderUncleanAtOrBelow (tuner, rig, 16);
+        tuner.start();
+        bool intentKept = true, droppedSeen = false;
+
+        for (int guard = 0; guard < 5000 && tuner.isRunning(); ++guard)
+        {
+            tuner.tick();
+            droppedSeen = droppedSeen || ! engine.isMonitorActive();
+            intentKept = intentKept && buildSettingsXml ("rack84", engine)->getChildByName ("MONITOR")->getIntAttribute ("enabled") == 1;
+        }
+
+        check (! tuner.isRunning() && tuner.getResult().startsWith (ja ("最小遅延")) && tuner.getResult().contains ("64"), "the run ends on buffer 64, the smallest size the monitor can run at (" + tuner.getResult() + ")");
+        check (droppedSeen && intentKept, "the monitor was dropped at the sizes it could not open, and the saved choice stayed on at every tick");
+        check (engine.isMonitorActive() && engine.getMonitorPlan() == MonitorPlan { true, "FakeMon", 6 } && rig.runningBuffer() == 64 && rig.world.aggregatesAlive == 1,
+               "afterwards the monitor is running again at the final size");
+    }
+
+    //==========================================================================
+    // A failure that happens while the UI is busy is picked up afterwards.
+    {
+        const auto setupOf = []
+        {
+            AudioDeviceManager::AudioDeviceSetup setup;
+            setup.outputDeviceName = "FakeOut";
+            setup.inputDeviceName = "FakeIn";
+            setup.sampleRate = 48000.0;
+            setup.bufferSize = 64;
+            setup.inputChannels.setBit (0);
+            setup.outputChannels.setRange (0, 2, true);
+            setup.useDefaultInputChannels = setup.useDefaultOutputChannels = false;
+            return setup;
+        };
+
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        auto& engine = rig.engine;
+
+        // JUCE reopens by itself (a device list change) and the open fails with the monitor in use.
+        rig.world.maxOpenOutputs = 2;
+        engine.deviceManager.closeAudioDevice();
+        const auto error = engine.deviceManager.setAudioDeviceSetup (setupOf(), true);
+        check (error.isNotEmpty() && engine.deviceManager.getCurrentAudioDevice() == nullptr && engine.getMonitorPlan().enabled, "the device JUCE reopened failed: nothing is open and nothing has reacted yet");
+        check (engine.serviceMonitor() && engine.deviceManager.getCurrentAudioDevice() != nullptr && ! engine.isMonitorActive() && engine.takeMonitorProblem().isNotEmpty(),
+               "the service step that runs when the busy period ends opens the main output alone, with a reason");
+        check (! engine.serviceMonitor(), "and then has nothing to do");
+    }
+
+    // A failure recorded for a device that is gone does not cost a monitor that works.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        auto& engine = rig.engine;
+        AudioDeviceManager::AudioDeviceSetup setup;
+        setup.outputDeviceName = "FakeOut";
+        setup.inputDeviceName = "FakeIn";
+        setup.sampleRate = 48000.0;
+        setup.bufferSize = 64;
+        setup.inputChannels.setBit (0);
+        setup.outputChannels.setRange (0, 2, true);
+        setup.useDefaultInputChannels = setup.useDefaultOutputChannels = false;
+
+        rig.world.maxOpenOutputs = 2;
+        engine.deviceManager.closeAudioDevice();
+        check (engine.deviceManager.setAudioDeviceSetup (setup, true).isNotEmpty(), "the first open fails and is recorded");
+        rig.world.maxOpenOutputs = 0;
+        check (engine.deviceManager.setAudioDeviceSetup (setup, true).isEmpty() && engine.isMonitorActive(), "JUCE's next open, on a device that works, runs the monitor");
+        check (! engine.serviceMonitor() && engine.isMonitorActive() && engine.getMonitorPlan().enabled && engine.takeMonitorProblem().isEmpty(),
+               "the earlier failure is not held against it");
+    }
+
+    // The restore of a scope reopens once.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        auto& engine = rig.engine;
+        const auto created = rig.world.devicesCreated;
+        {
+            ScopedSetup scope (engine);
+            engine.setMonitorPlan ({ false, "FakeMon", 6 });
+        }
+
+        check (engine.isMonitorActive() && rig.world.devicesCreated == created + 2, "turning the monitor off for a scope and restoring it makes two devices, not three (" + String (rig.world.devicesCreated - created) + ")");
+    }
+
+    //==========================================================================
+    // A measurement is of the main output path: it takes the monitor out and puts it back.
+    {
+        Rig rig (monitorSettings ("<MONITOR enabled=\"1\" device=\"FakeMon\" firstChannel=\"6\"/>"), {}, monitorWorld);
+        {
+            measure::Session session (rig.engine, {});
+            const auto started = session.start();       // stops at the HAL lookup, which the fake layer has no aggregate for
+            check (! started && session.getResult().problem.isNotEmpty(), "a session on the fake layer cannot start (no HAL aggregate)");
+        }
+
+        check (rig.engine.isMonitorActive() && rig.engine.getMonitorPlan() == MonitorPlan { true, "FakeMon", 6 } && rig.world.aggregatesAlive == 1,
+               "the monitor is back on after the session is gone");
+        check (rig.world.aggregatesCreated == 2, "after it was out of the way for the session (" + String (rig.world.aggregatesCreated) + " aggregates made in all)");
+        check (rig.engine.deviceManager.getAudioDeviceSetup().outputDeviceName == "FakeOut", "and the output device is still the main one");
+    }
+
+    //==========================================================================
+    // The one monitor-path figure, and the main rows staying as they are.
+    {
+        hal::Numbers aggregate;
+        aggregate.bufferSize = 64;
+        aggregate.inputSafety = 5;
+        aggregate.outputSafety = 4;
+
+        BreakdownInput input;
+        input.sampleRate = 44100.0;
+        input.aggregate = aggregate;
+        input.plugins.push_back ({ 0, "P", 100, false });
+        const auto breakdown = computeBreakdown (input);
+
+        hal::Numbers monitor;
+        monitor.outputSafety = 10;
+        monitor.outputLatency = 20;
+        monitor.outputStreamLatency = 3;
+
+        check (breakdown.declaredSamples == 5 + 64 + 100 + 64 + 4, "the main breakdown does not know about the monitor (" + String (breakdown.declaredSamples) + " samples)");
+        check (declareMonitorPath (breakdown, monitor, 64, 1.0) == 5 + 64 + 100 + 64 + 33, "the monitor path is the input side, the plugins and the monitor device's own output side");
+        check (declareMonitorPath (breakdown, monitor, 64, 0.5) == 5 + 64 + 100 + 32 + 33, "at a cycle usage of 0.5 the output buffer counts half");
+    }
+
+    say (check.ok ? "SELFTEST MONITOR OK" : "SELFTEST MONITOR FAILED");
     return check.ok ? 0 : 1;
 }
 

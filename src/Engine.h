@@ -4,6 +4,7 @@
 #include "Chain.h"
 #include "Hal.h"
 #include "HostCallback.h"
+#include "Monitor.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <optional>
@@ -20,7 +21,7 @@ struct Experiments
 
 // Text for the status line when a device's nominal rate is not the rate the app runs at, which means
 // the system converts between the two; empty when all known rates agree. A rate of 0 is unknown.
-String describeRateMismatch (double runningRate, double inputRate, double outputRate);
+String describeRateMismatch (double runningRate, double inputRate, double outputRate, double monitorRate = 0.0);
 
 // The IO cycle usage is a fraction in (0, 1]. NaN, zero, negative and larger values (from a damaged
 // settings file or a mistyped option) are rejected before they can reach the HAL.
@@ -39,12 +40,21 @@ struct AudioSettings
 class Engine
 {
 public:
-    Engine();
+    // The monitor layer (Monitor.h) goes in front of the CoreAudio device type right here, before anything
+    // can ask the device manager for its types: a window's device panel does, and would otherwise make
+    // JUCE add a plain CoreAudio type that the layer cannot get in front of. With the monitor off, which
+    // is how an engine starts, the layer hands out CoreAudio's own devices untouched. Tests pass false and
+    // give a fake layer to useDeviceType().
+    explicit Engine (bool useCoreAudio = true);
     ~Engine();
 
     // `deviceSetup` is the DEVICESETUP element of the settings, or null to keep every device closed
     // (a mic wired straight to the speakers on first launch would feed back).
     void openDevices (const XmlElement* deviceSetup);
+
+    // For tests, on an Engine made with `false`: the device layer to put the monitor layer in front of,
+    // instead of CoreAudio. Call once, before anything opens.
+    void useDeviceType (std::unique_ptr<AudioIODeviceType> inner, std::unique_ptr<MonitorBackend> backend);
 
     // The same from a whole settings file: its DEVICESETUP and its cycleUsage attribute. Null keeps every device closed.
     void openFromSettings (const XmlElement* settingsRoot);
@@ -66,13 +76,21 @@ public:
     AudioObjectID getAggregate() const noexcept     { return aggregate; }
     int getOverloads() const noexcept               { return overloads != nullptr ? overloads->getCount() : 0; }
     void resetOverloads() noexcept                  { if (overloads != nullptr) overloads->reset(); }
-    hal::Numbers getAggregateNumbers() const        { return aggregate != kAudioObjectUnknown ? hal::readNumbers (aggregate) : hal::Numbers {}; }
+
+    // The aggregate's numbers. With the monitor on, the aggregate also holds the monitor device, whose
+    // own latency and safety offset would raise the aggregate's output side; the output side here is
+    // always the main output device's own, so the breakdown keeps describing the main path.
+    hal::Numbers getAggregateNumbers() const;
+
+    // The monitor device's own numbers; empty when the monitor is not running.
+    hal::Numbers getMonitorNumbers() const;
 
     // Nominal rates of the two devices as they were right after the device was opened (0 when unknown).
     // JUCE writes its rate into the devices it opens, so the output device (a virtual one in particular)
     // usually follows the app, while an input interface that cannot run at the app's rate keeps its own
     // and the aggregate converts.
-    struct DeviceRates { double input = 0.0, output = 0.0; };
+    // `monitor` is the monitor device's, only while the monitor runs.
+    struct DeviceRates { double input = 0.0, output = 0.0, monitor = 0.0; };
     DeviceRates getDeviceRates() const noexcept     { return deviceRates; }
 
     void setExperiments (const Experiments&);
@@ -113,8 +131,44 @@ public:
     // Nominal sample rate of a named device straight from the HAL (0 when it does not exist).
     static double nominalRateOf (const String& deviceName, bool input);
 
+    //==============================================================================
+    // The monitor output: the processed voice also on a second device. The plan is the user's choice and
+    // is what the settings file holds; whether it is running is a separate question (isMonitorActive),
+    // because it is left off, with a reason, when the devices cannot be combined. All on the message thread.
+    MonitorPlan getMonitorPlan() const;
+    bool isMonitorActive() const;
+
+    // Applies a plan. An open device is reopened when what it carries changes; nothing at all is created
+    // or opened for a plan that is off. Afterwards getMonitorPlan() says what took effect.
+    // `reopen` false only for a caller that opens the device itself right after (ScopedSetup).
+    void setMonitorPlan (const MonitorPlan&, bool reopen = true);
+
+    // The reason the monitor was left off, once; empty when there is none.
+    String takeMonitorProblem();
+
+    // Stops using the monitor while its device is away, keeping the choice. True when it did.
+    bool checkMonitor();
+
+    // Tries a waiting monitor again, for when the device list has changed. True when the device was reopened.
+    bool retryMonitor();
+
+    // All of the above in the order they matter, for the places that cannot tell which one is due: after a
+    // device list change, when a MIN LATENCY run or a measurement ends, and on the timer. True when it
+    // changed anything.
+    bool serviceMonitor();
+
+    // For a device that JUCE reopened by itself (a device list change) and that failed to open with the
+    // monitor in use: turns the monitor off with the reason and opens the main output alone. True when it did.
+    bool recoverMonitorFailure();
+
+    StringArray getMonitorCandidates() const;
+    int countMonitorChannels (const String& deviceName) const;
+
 private:
     void applyExperiments();
+    void reopenDevice();
+    bool fallBackFromOpenFailure();
+    bool monitorNeedsReopen() const;
 
     AudioObjectID aggregate = kAudioObjectUnknown;
     std::unique_ptr<hal::OverloadListener> overloads;
@@ -122,6 +176,8 @@ private:
     DeviceRates deviceRates;
     Experiments experiments;
     bool started = false;
+    MonitorDeviceType* monitorType = nullptr;       // owned by deviceManager
+    AudioObjectID mainOutput = kAudioObjectUnknown, monitorOutput = kAudioObjectUnknown;     // while the monitor runs
 
     std::optional<ExcessRecord> excess;
 
@@ -144,6 +200,7 @@ private:
     AudioDeviceManager::AudioDeviceSetup saved;
     bool hadDevice = false;
     Experiments experiments;
+    MonitorPlan monitor;
 };
 
 } // namespace mfx

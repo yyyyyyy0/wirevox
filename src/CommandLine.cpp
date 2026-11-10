@@ -4,6 +4,7 @@
 #include "Engine.h"
 #include "Measure.h"
 #include "MeasureCommand.h"
+#include "Monitor.h"
 #include "Product.h"
 #include "SelfTests.h"
 #include "Settings.h"
@@ -40,7 +41,8 @@ namespace
         say ("       " + name + " --selftest <path to .vst3> [--rate <Hz>]");
         say ("       " + name + " --selftest-settings");
         say ("       " + name + " --selftest-correlate | --selftest-chain | --selftest-sweep | --selftest-timing | --selftest-engine");
-        say ("       " + name + " --selftest-breakdown | --selftest-processtime");
+        say ("       " + name + " --selftest-breakdown | --selftest-processtime | --selftest-monitor");
+        say ("       " + name + " --probe-monitor \"<main output>\" \"<monitor device>\"");
         say ("       " + name + " --measure | --measure-sweep | --tune --settings <file> [--runs N] [--buffer N] [--io-cycle-usage X] [--with-chain] [--force]");
         say ("       " + name + " --list-devices");
         say ("");
@@ -55,6 +57,8 @@ namespace
         say ("  --selftest-engine    persisted audio settings, MIN LATENCY and device restore on a fake device layer");
         say ("  --selftest-breakdown the latency breakdown's arithmetic, its largest row, and the measured excess saved and restored");
         say ("  --selftest-processtime per-plugin processing time: the hand-over, the windows, the heaviest slot, and the probes in the graph");
+        say ("  --selftest-monitor   the monitor output: its settings, the channel routing and the copy to the monitor pair, on a fake device layer");
+        say ("  --probe-monitor      make the monitor's aggregate device as the app would, print the devices' rates and the channel layout, destroy it (no IO)");
         say ("  --measure            inject a test burst, record it on the output device and print the latency");
         say ("  --measure-sweep      repeat that for buffer sizes and switches and print a table sorted by latency");
         say ("  --tune               run the MIN LATENCY search without a window, then restore the setup");
@@ -577,7 +581,8 @@ bool isCommandLineMode (const StringArray& args)
     return args.contains ("--selftest") || args.contains ("--selftest-correlate") || args.contains ("--selftest-chain")
         || args.contains ("--selftest-sweep") || args.contains ("--selftest-settings") || args.contains ("--selftest-timing")
         || args.contains ("--selftest-engine") || args.contains ("--selftest-engine-child")
-        || args.contains ("--selftest-breakdown") || args.contains ("--selftest-processtime")
+        || args.contains ("--selftest-breakdown") || args.contains ("--selftest-processtime") || args.contains ("--selftest-monitor")
+        || args.contains ("--probe-monitor")
         || args.contains ("--list-devices") || args.contains ("--help") || isMeasureMode (args);
 }
 
@@ -642,6 +647,20 @@ int runCommandLine (const StringArray& args)
 
     if (args.contains ("--selftest-processtime"))
         return selfTestProcessTime();
+
+    if (args.contains ("--selftest-monitor"))
+        return selfTestMonitor();
+
+    if (const auto probe = args.indexOf ("--probe-monitor"); probe >= 0)
+    {
+        if (probe + 2 >= args.size())
+        {
+            printUsage();
+            return 64;
+        }
+
+        return runProbeMonitor (args[probe + 1], args[probe + 2]);
+    }
 
     if (const auto child = args.indexOf ("--selftest-engine-child"); child >= 0 && child + 1 < args.size())
         return selfTestEngineChild (args[child + 1]);

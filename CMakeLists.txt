@@ -55,6 +55,7 @@ target_sources(MicFxHost PRIVATE
     src/CommandLine.cpp
     src/Correlate.cpp
     src/Hal.cpp
+    src/Monitor.cpp
     src/HostCallback.cpp
     src/Engine.cpp
     src/LatencyTuner.cpp
@@ -112,3 +113,4 @@ add_test(NAME "${MFX_PRODUCT_NAME} latency timing and burst injection" COMMAND M
 add_test(NAME "${MFX_PRODUCT_NAME} engine persistence, MIN LATENCY and restore" COMMAND MicFxHost --selftest-engine)
 add_test(NAME "${MFX_PRODUCT_NAME} latency breakdown and saved excess" COMMAND MicFxHost --selftest-breakdown)
 add_test(NAME "${MFX_PRODUCT_NAME} per-plugin processing time" COMMAND MicFxHost --selftest-processtime)
+add_test(NAME "${MFX_PRODUCT_NAME} monitor output" COMMAND MicFxHost --selftest-monitor)

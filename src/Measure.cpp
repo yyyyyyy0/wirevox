@@ -184,6 +184,20 @@ bool Session::start()
 
     restore = std::make_unique<ScopedSetup> (engine);
 
+    // With the monitor on, the aggregate holds a second output device, which changes the HAL's timestamps
+    // for the cycle and the path the burst takes. The measurement is of the main output path, so the
+    // monitor is off for it; the ScopedSetup brings it back.
+    if (engine.getMonitorPlan().enabled)
+    {
+        auto off = engine.getMonitorPlan();
+        off.enabled = false;
+        engine.setMonitorPlan (off);
+        device = engine.deviceManager.getCurrentAudioDevice();
+
+        if (device == nullptr)
+            return fail ("the audio device could not be reopened without the monitor", ja ("モニターを外してデバイスを開き直せませんでした"));
+    }
+
     engine.refreshHal();
     const auto setup = engine.deviceManager.getAudioDeviceSetup();
     result.sampleRate = device->getCurrentSampleRate();

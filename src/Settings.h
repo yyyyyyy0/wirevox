@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Breakdown.h"
+#include "Monitor.h"
 
 #include <juce_core/juce_core.h>
 #include <optional>
@@ -41,8 +42,16 @@ void writeThemeId (juce::XmlElement& root, const juce::String& id);
 std::optional<ExcessRecord> readExcess (const juce::XmlElement& root);
 void writeExcess (juce::XmlElement& root, const ExcessRecord&);
 
+// The monitor output is a MONITOR child of the root: enabled, the device's name and the zero-based first
+// channel of the pair. Settings files from before it existed have none, which reads as off; so does any
+// value that cannot be right (an empty device name, a negative or unreadable channel). Whether the device
+// exists and has the channels is only known when it is opened, and is checked there.
+MonitorPlan readMonitor (const juce::XmlElement& root);
+void writeMonitor (juce::XmlElement& root, const MonitorPlan&);
+
 // The whole document the app writes: theme, the audio settings the engine says are persistable
-// (see Engine::getPersistedAudio), the measured excess that still applies to the open device, and the chain.
+// (see Engine::getPersistedAudio), the measured excess that still applies to the open device, the
+// monitor choice and the chain.
 std::unique_ptr<juce::XmlElement> buildSettingsXml (const juce::String& themeId, const Engine&);
 
 std::unique_ptr<juce::XmlElement> loadSettings();

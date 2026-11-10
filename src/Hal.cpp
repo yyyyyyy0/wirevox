@@ -107,6 +107,34 @@ namespace
     }
 }
 
+String uidOf (AudioObjectID id)
+{
+    CFStringRef uid = nullptr;
+    UInt32 size = sizeof (uid);
+    auto a = address (kAudioDevicePropertyDeviceUID);
+
+    if (AudioObjectGetPropertyData (id, &a, 0, nullptr, &size, &uid) != noErr || uid == nullptr)
+        return {};
+
+    auto result = String::fromCFString (uid);
+    CFRelease (uid);
+    return result;
+}
+
+String clockUidOf (AudioObjectID aggregate)
+{
+    CFStringRef uid = nullptr;
+    UInt32 size = sizeof (uid);
+    auto a = address (kAudioAggregateDevicePropertyClockDevice);
+
+    if (AudioObjectGetPropertyData (aggregate, &a, 0, nullptr, &size, &uid) != noErr || uid == nullptr)
+        return {};
+
+    auto result = String::fromCFString (uid);
+    CFRelease (uid);
+    return result;
+}
+
 String nameOf (AudioObjectID id)
 {
     CFStringRef name = nullptr;
@@ -191,6 +219,119 @@ Numbers readNumbers (AudioObjectID id)
     fill (kAudioObjectPropertyScopeInput, n.inputLatency, n.inputSafety, n.inputStreamLatency, n.inputChannels);
     fill (kAudioObjectPropertyScopeOutput, n.outputLatency, n.outputSafety, n.outputStreamLatency, n.outputChannels);
     return n;
+}
+
+std::vector<SubDeviceChannels> outputChannelLayout (AudioObjectID aggregate)
+{
+    std::vector<SubDeviceChannels> layout;
+    int next = 0;
+
+    for (auto id : subDevices (aggregate))
+    {
+        const auto n = channelCount (id, kAudioObjectPropertyScopeOutput);
+        layout.push_back ({ id, next, n });
+        next += n;
+    }
+
+    return layout;
+}
+
+std::unique_ptr<PrivateAggregate> PrivateAggregate::create (const String& name, const String& uid, AudioObjectID clock, AudioObjectID other, String& error)
+{
+    const auto clockUid = uidOf (clock), otherUid = uidOf (other);
+
+    if (clockUid.isEmpty() || otherUid.isEmpty())
+    {
+        error = "a device has no UID";
+        return nullptr;
+    }
+
+    const auto number = [] (int value) { return CFNumberCreate (nullptr, kCFNumberIntType, &value); };
+    const auto text = [] (const String& s) { return s.toCFString(); };
+    const auto set = [] (CFMutableDictionaryRef dictionary, const char* key, CFTypeRef value)
+    {
+        const auto cfKey = CFStringCreateWithCString (nullptr, key, kCFStringEncodingUTF8);
+        CFDictionarySetValue (dictionary, cfKey, value);
+        CFRelease (cfKey);
+        CFRelease (value);
+    };
+    const auto newDictionary = [] { return CFDictionaryCreateMutable (nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks); };
+
+    // The value of kAudioAggregateDriftCompensationHighQuality, which needs a newer SDK than the project's minimum.
+    constexpr int driftCompensationHighQuality = 0x60;
+
+    auto subDevices = CFArrayCreateMutable (nullptr, 0, &kCFTypeArrayCallBacks);
+
+    for (const auto& subUid : { clockUid, otherUid })
+    {
+        auto subDevice = newDictionary();
+        set (subDevice, kAudioSubDeviceUIDKey, text (subUid));
+        set (subDevice, kAudioSubDeviceDriftCompensationKey, number (subUid != clockUid ? 1 : 0));
+        set (subDevice, kAudioSubDeviceDriftCompensationQualityKey, number (driftCompensationHighQuality));
+        CFArrayAppendValue (subDevices, subDevice);
+        CFRelease (subDevice);
+    }
+
+    auto description = newDictionary();
+    set (description, kAudioAggregateDeviceNameKey, text (name));
+    set (description, kAudioAggregateDeviceUIDKey, text (uid));
+    set (description, kAudioAggregateDeviceClockDeviceKey, text (clockUid));
+   #if defined (kAudioAggregateDeviceMainSubDeviceKey)
+    set (description, kAudioAggregateDeviceMainSubDeviceKey, text (clockUid));
+   #else
+    set (description, kAudioAggregateDeviceMasterSubDeviceKey, text (clockUid));
+   #endif
+    set (description, kAudioAggregateDeviceIsPrivateKey, number (1));
+    set (description, kAudioAggregateDeviceIsStackedKey, number (0));
+    set (description, kAudioAggregateDeviceSubDeviceListKey, subDevices);
+
+    AudioObjectID created = kAudioObjectUnknown;
+    const auto status = AudioHardwareCreateAggregateDevice (description, &created);
+    CFRelease (description);
+
+    if (status != noErr || created == kAudioObjectUnknown)
+    {
+        error = "AudioHardwareCreateAggregateDevice failed (OSStatus " + String ((int) status) + ")";
+        return nullptr;
+    }
+
+    return std::unique_ptr<PrivateAggregate> (new PrivateAggregate (created));
+}
+
+namespace { AudioObjectID lastDestroyed = kAudioObjectUnknown; }
+
+OSStatus PrivateAggregate::destroy()
+{
+    if (id == kAudioObjectUnknown)
+        return noErr;
+
+    const auto status = AudioHardwareDestroyAggregateDevice (id);
+
+    if (status == noErr)
+        lastDestroyed = id;
+
+    id = kAudioObjectUnknown;
+    return status;
+}
+
+void PrivateAggregate::waitForLastDestroyed (int timeoutMs)
+{
+    for (int waited = 0; lastDestroyed != kAudioObjectUnknown && waited <= timeoutMs; waited += 10)
+    {
+        const auto devices = allDevices();
+
+        if (std::find (devices.begin(), devices.end(), lastDestroyed) == devices.end())
+            break;
+
+        usleep (10000);
+    }
+
+    lastDestroyed = kAudioObjectUnknown;
+}
+
+PrivateAggregate::~PrivateAggregate()
+{
+    destroy();
 }
 
 bool setBufferSize (AudioObjectID id, int frames)

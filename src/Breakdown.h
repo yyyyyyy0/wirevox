@@ -106,6 +106,11 @@ struct SideSums
 
 SideSums sumSides (const Breakdown&);
 
+// The monitor path as the HAL declares it, in samples: the input side and the plugins as in `breakdown`,
+// then the monitor device's own output side (the buffer at the IO cycle usage, its safety offset, latency
+// and stream latency). The drift compensation between the two devices declares nothing and is not in it.
+int declareMonitorPath (const Breakdown&, const hal::Numbers& monitorDevice, int bufferSize, double cycleUsage);
+
 // Index of the row with the most milliseconds among the known ones (the first of equals), or -1 when
 // none is above zero.
 int findLargestRow (const std::vector<BreakdownRow>&);

@@ -227,6 +227,7 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     // keeps every device closed until the user picks one: a mic wired straight to the speakers
     // on first launch would feed back.
     engine.openFromSettings (settings.get());
+    const auto monitorProblem = engine.takeMonitorProblem();
 
     bool skippedChainAfterCrash = false;
 
@@ -259,6 +260,19 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     deviceViewport.setViewedComponent (&deviceSelector, false);
     deviceViewport.setScrollBarsShown (true, false);
     addAndMakeVisible (deviceViewport);
+
+    monitorToggle.setTooltip (ja ("処理後の音を、メイン出力とは別のデバイスにも出します。通話の相手に届く音は変わりません"));
+    monitorToggle.onClick = [this] { applyMonitor(); };
+    monitorDevice.setTextWhenNothingSelected (ja ("モニター機器"));
+    monitorDevice.setTooltip (ja ("モニターの出力先のデバイス"));
+    monitorDevice.onChange = [this] { applyMonitor (true); };
+    monitorPair.setTextWhenNothingSelected (ja ("ch"));
+    monitorPair.setTooltip (ja ("モニターに使うチャンネルの組（左右）"));
+    monitorPair.onChange = [this] { applyMonitor(); };
+    addAndMakeVisible (monitorToggle);
+    addAndMakeVisible (monitorDevice);
+    addAndMakeVisible (monitorPair);
+    refreshMonitorControls();
 
     listModel = std::make_unique<ChainListModel> (*this);
     chainList.setModel (listModel.get());
@@ -307,6 +321,10 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
         showStatus (ja ("前回は読み込み中に終了したため、チェーンを読み込んでいません（元の設定: settings.crashed.xml）"));
     else if (! restoreProblems.isEmpty())
         showStatus (ja ("復元できなかったプラグイン: ") + restoreProblems.joinIntoString (" / "));
+    else if (monitorProblem.isNotEmpty())
+        showStatus (monitorProblem);
+    else if (engine.getMonitorPlan().enabled && deviceManager.getCurrentAudioDevice() == nullptr)
+        showStatus (ja ("モニターは待機中です（メイン出力のデバイスが開いていません）"));
 
     setSize (1000, 720);
     lookAndFeelChanged();
@@ -368,7 +386,18 @@ void MainComponent::resized()
     deviceTitle = left.removeFromTop (m.panelTitleHeight);
     left.removeFromTop (4);
     deviceFrame = left;
-    deviceViewport.setBounds (left.reduced (4));
+
+    // The monitor controls sit under the device list: the toggle, then the device and the channel pair.
+    auto deviceArea = left.reduced (4);
+    auto monitorArea = deviceArea.removeFromBottom (2 * m.controlHeight + 12);
+    monitorArea.removeFromTop (8);
+    monitorToggle.setBounds (monitorArea.removeFromTop (m.controlHeight));
+    monitorArea.removeFromTop (4);
+    auto monitorRow = monitorArea.removeFromTop (m.controlHeight);
+    monitorPair.setBounds (monitorRow.removeFromRight (jmin (96, monitorRow.getWidth() / 3)));
+    monitorRow.removeFromRight (6);
+    monitorDevice.setBounds (monitorRow);
+    deviceViewport.setBounds (deviceArea);
     deviceSelector.setSize (deviceViewport.getMaximumVisibleWidth(), deviceSelector.getHeight());
 
     area.removeFromLeft (14);
@@ -635,6 +664,9 @@ void MainComponent::updateBusyState()
     minLatencyButton.setButtonText (tuning ? ja ("中止") : "MIN LATENCY");
     minLatencyButton.setEnabled (! measuring);
     deviceSelector.setEnabled (! busy);
+    monitorToggle.setEnabled (! busy);
+    monitorDevice.setEnabled (! busy);
+    monitorPair.setEnabled (! busy);
     addButton.setEnabled (! busy);
     chainList.setEnabled (! busy);
     breakdown.setMeasuring (measuring, ! tuning && deviceManager.getCurrentAudioDevice() != nullptr);
@@ -645,6 +677,7 @@ void MainComponent::tuningEnded()
 {
     updateBusyState();
     showStatus (tuner.getResult());
+    serviceMonitor();
     persist();
 }
 
@@ -666,7 +699,9 @@ void MainComponent::askToMeasure()
         .withIconType (MessageBoxIconType::WarningIcon)
         .withTitle (ja ("仮想デバイスを計測します"))
         .withMessage (ja ("計測の間（数秒）、出力デバイス「") + deviceManager.getAudioDeviceSetup().outputDeviceName
-                      + ja ("」に試験音が流れ、マイクの音は止まります。通話中は、通話の相手に試験音が聞こえます。\n\n計測を始めますか？"))
+                      + ja ("」に試験音が流れ、マイクの音は止まります。通話中は、通話の相手に試験音が聞こえます。")
+                      + (engine.getMonitorPlan().enabled ? ja ("モニター出力は、計測の間だけ止まります。") : String())
+                      + ja ("\n\n計測を始めますか？"))
         .withButton (ja ("計測する"), 1)
         .withButton (ja ("やめる"), 0)
         .withAssociatedComponent (this);
@@ -730,8 +765,98 @@ void MainComponent::measuringEnded()
     measureSession.reset();
     updateBusyState();
     showStatus (message);
+    serviceMonitor();
     persist();
     updateReadout();
+}
+
+//==============================================================================
+// The device and the pair only say what the user wants; the engine decides whether it can be done, and
+// what it reports back (it can leave the monitor off with a reason) is what the controls then show.
+void MainComponent::applyMonitor (bool deviceChanged)
+{
+    if (isBusy())
+        return;
+
+    auto plan = engine.getMonitorPlan();
+    plan.enabled = monitorToggle.getToggleState();
+
+    if (monitorDevice.getSelectedId() > 0)
+    {
+        const auto chosen = monitorDevice.getText();
+
+        if (deviceChanged && chosen != plan.device)
+            fillMonitorPairs (chosen, plan.firstChannel);
+
+        plan.device = chosen;
+    }
+
+    if (monitorPair.getSelectedId() > 0)
+        plan.firstChannel = (monitorPair.getSelectedId() - 1) * 2;
+
+    String message;
+
+    if (plan.enabled && (monitorDevice.getSelectedId() <= 0 || monitorPair.getSelectedId() <= 0))
+    {
+        plan.enabled = false;
+        message = ja ("モニター機器とチャンネルを選んでください");
+    }
+
+    engine.setMonitorPlan (plan);
+    chain.rewire();
+
+    if (const auto problem = engine.takeMonitorProblem(); problem.isNotEmpty())
+        message = problem;
+
+    refreshMonitorControls();
+    showStatus (message);
+    persist();
+    updateReadout();
+}
+
+void MainComponent::serviceMonitor()
+{
+    if (! engine.serviceMonitor())
+        return;
+
+    chain.rewire();
+    refreshMonitorControls();
+
+    if (const auto problem = engine.takeMonitorProblem(); problem.isNotEmpty())
+        showStatus (problem);
+
+    persist();
+}
+
+void MainComponent::refreshMonitorControls()
+{
+    const auto plan = engine.getMonitorPlan();
+    const auto names = engine.getMonitorCandidates();
+
+    monitorDevice.clear (dontSendNotification);
+    monitorDevice.addItemList (names, 1);
+
+    if (const auto index = names.indexOf (plan.device); index >= 0)
+        monitorDevice.setSelectedId (index + 1, dontSendNotification);
+
+    fillMonitorPairs (plan.device, plan.firstChannel);
+    monitorToggle.setToggleState (plan.enabled, dontSendNotification);
+}
+
+// Pairs start on odd channel numbers (1/2, 3/4, ... 31/32); one that does not line up is left unselected.
+void MainComponent::fillMonitorPairs (const String& deviceName, int firstChannel)
+{
+    const auto pairs = deviceName.isNotEmpty() ? engine.countMonitorChannels (deviceName) / 2 : 0;
+
+    monitorPair.clear (dontSendNotification);
+
+    for (int i = 0; i < pairs; ++i)
+        monitorPair.addItem (String (i * 2 + 1) + " / " + String (i * 2 + 2), i + 1);
+
+    if (firstChannel >= 0 && firstChannel % 2 == 0 && firstChannel / 2 < pairs)
+        monitorPair.setSelectedId (firstChannel / 2 + 1, dontSendNotification);
+    else if (pairs > 0)
+        monitorPair.setSelectedId (1, dontSendNotification);
 }
 
 void MainComponent::persist()
@@ -785,6 +910,10 @@ void MainComponent::updateReadout()
         else
             text << ja ("合計（出力デバイスの超過分を除く）: ") << samplesAndMs (latency->declaredSamples, sampleRate) << "\n";
 
+        if (engine.isMonitorActive())
+            text << ja ("モニター経路（申告値。デバイス間のドリフト補正は含みません）: ")
+                 << samplesAndMs (declareMonitorPath (*latency, engine.getMonitorNumbers(), device->getCurrentBufferSizeSamples(), engine.getCycleUsage()), sampleRate) << "\n";
+
         text << ja ("負荷（コールバックの所要時間 / バッファ時間）: 平均 ") << String (load.meanPercent, 1) << " % / "
              << ja ("最大 ") << String (load.maxPercent, 1) << " %\n"
              << ja ("オーバーロード: ") << engine.getOverloads() << ja ("  遅れたコールバック: ") << (int) load.late;
@@ -794,7 +923,7 @@ void MainComponent::updateReadout()
 
         text << "\n";
 
-        standingWarning = describeRateMismatch (sampleRate, rates.input, rates.output);
+        standingWarning = describeRateMismatch (sampleRate, rates.input, rates.output, rates.monitor);
 
         if (device->getActiveInputChannels().isZero())
             text << ja ("入力チャンネルが選ばれていません。\n");
@@ -898,6 +1027,11 @@ void MainComponent::timerCallback()
     if (measureSession != nullptr && measureSession->tick())
         measuringEnded();
 
+    // A monitor that was dropped, lost or waiting while something else was busy, or that the device list says
+    // can run now (looked at once per list).
+    if (! isBusy())
+        serviceMonitor();
+
     // What the audio thread timed since the last tick. A new device start (another buffer size or
     // rate) changes what a share of a buffer means, so the old readings go.
     if (const auto startCount = engine.callback.getStartCount(); startCount != seenStartCount)
@@ -918,7 +1052,17 @@ void MainComponent::timerCallback()
 
 void MainComponent::changeListenerCallback (ChangeBroadcaster*)
 {
+    // A device list change is when a waiting monitor is tried again, and when a reopen that JUCE did by
+    // itself and that failed with the monitor in use is retried without it.
+    if (! isBusy())
+        engine.serviceMonitor();
+
     chain.rewire();
+    refreshMonitorControls();
+
+    if (const auto problem = engine.takeMonitorProblem(); problem.isNotEmpty())
+        showStatus (problem);
+
     persist();
     updateReadout();
 }

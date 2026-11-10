@@ -23,6 +23,11 @@ int selfTestBreakdown();
 // of the heaviest slot, and that the probes leave the graph (latency, bypass, routing) as it was.
 int selfTestProcessTime();
 
+// The monitor output on a fake device layer: its settings (round trip, old files, damaged values), the
+// channel routing and the copy to the monitor pair (also with the chain bypassed), the device name that the
+// rest of the app sees, and what is created and destroyed when.
+int selfTestMonitor();
+
 // The child process of the kill test: tunes against the fake device and waits to be killed.
 int selfTestEngineChild (const juce::String& settingsPath);
 

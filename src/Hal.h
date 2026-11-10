@@ -23,6 +23,8 @@ struct Numbers
 };
 
 String nameOf (AudioObjectID);
+String uidOf (AudioObjectID);
+String clockUidOf (AudioObjectID aggregate);
 std::vector<AudioObjectID> allDevices();
 
 // Exact name match. Aggregate devices are skipped unless asked for.
@@ -33,6 +35,41 @@ AudioObjectID findJuceAggregate();
 
 std::vector<AudioObjectID> subDevices (AudioObjectID aggregate);
 Numbers readNumbers (AudioObjectID);
+
+// Where a sub-device's output channels sit in an aggregate, numbered the way JUCE numbers them: the
+// active sub-devices in list order, each with its own channels in a row.
+struct SubDeviceChannels
+{
+    AudioObjectID id = kAudioObjectUnknown;
+    int firstChannel = 0, numChannels = 0;
+};
+
+std::vector<SubDeviceChannels> outputChannelLayout (AudioObjectID aggregate);
+
+// A private aggregate device (visible to this process only, gone when it exits) of two output devices:
+// `clock` drives it and `other` is drift-compensated by the HAL. Creating it starts no IO and writes no
+// sample rate; the HAL may still retune a sub-device itself, which `--probe-monitor` shows.
+class PrivateAggregate
+{
+public:
+    // Null when the HAL refuses; `error` then says why.
+    static std::unique_ptr<PrivateAggregate> create (const String& name, const String& uid, AudioObjectID clock, AudioObjectID other, String& error);
+    ~PrivateAggregate();
+
+    AudioObjectID getId() const noexcept    { return id; }
+
+    // Destroys it now and returns the HAL's status. The device list follows asynchronously, so nothing
+    // should look for the aggregate in it right after this returns.
+    OSStatus destroy();
+
+    // Message thread only: waits up to `timeoutMs` for the aggregate destroyed last to leave the device list.
+    static void waitForLastDestroyed (int timeoutMs);
+
+private:
+    explicit PrivateAggregate (AudioObjectID idIn) : id (idIn) {}
+
+    AudioObjectID id;
+};
 
 bool setBufferSize (AudioObjectID, int frames);
 
