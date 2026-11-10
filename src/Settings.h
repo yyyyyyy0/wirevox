@@ -5,6 +5,8 @@
 namespace mfx
 {
 
+class Engine;
+
 juce::File defaultSettingsFile (const juce::File& home);
 juce::File legacySettingsFile (const juce::File& home);
 
@@ -29,6 +31,10 @@ juce::File getSettingsFile();
 // Id of the selected theme; empty when the settings do not name one. Validation is the caller's job.
 juce::String readThemeId (const juce::XmlElement& root);
 void writeThemeId (juce::XmlElement& root, const juce::String& id);
+
+// The whole document the app writes: theme, the audio settings the engine says are persistable
+// (see Engine::getPersistedAudio) and the chain.
+std::unique_ptr<juce::XmlElement> buildSettingsXml (const juce::String& themeId, const Engine&);
 
 std::unique_ptr<juce::XmlElement> loadSettings();
 bool saveSettings (const juce::XmlElement&);

@@ -15,6 +15,16 @@ namespace
 
 LatencyTuner::LatencyTuner (Engine& e) : engine (e) {}
 
+LatencyTuner::~LatencyTuner()
+{
+    cancel();
+}
+
+void LatencyTuner::setReader (std::function<Reading()> newReader)
+{
+    reader = std::move (newReader);
+}
+
 bool LatencyTuner::isClean (int overloads, int64 late, double maxLoad, double allowedPercent)
 {
     return overloads == 0 && late == 0 && maxLoad <= allowedPercent;
@@ -22,6 +32,7 @@ bool LatencyTuner::isClean (int overloads, int64 late, double maxLoad, double al
 
 void LatencyTuner::start()
 {
+    result.clear();
     auto* device = engine.deviceManager.getCurrentAudioDevice();
 
     if (device == nullptr)
@@ -36,6 +47,12 @@ void LatencyTuner::start()
         if (size <= largestBuffer)
             sizes.add (size);
 
+    if (sizes.isEmpty())
+    {
+        result = ja ("このデバイスには試せるバッファサイズがありません");
+        return;
+    }
+
     const auto current = device->getCurrentBufferSizeSamples();
     index = 0;
 
@@ -43,26 +60,22 @@ void LatencyTuner::start()
         if (sizes[i] <= current)
             index = i;
 
+    originalSetup = engine.deviceManager.getAudioDeviceSetup();
     original = engine.getExperiments();
-    originalBuffer = current;
     usages = { 0.75f, 0.5f, 0.35f, 0.25f };
     usageIndex = 0;
     lastCleanIndex = -1;
     lastCleanUsageIndex = -1;
     direction = 0;          // decided by the first step
-    result.clear();
+    engine.holdPersistedAudio();
     phase = Phase::buffer;
     beginStep();
 }
 
 void LatencyTuner::cancel()
 {
-    if (phase == Phase::idle)
-        return;
-
-    lastCleanIndex = -1;
-    engine.setBufferSize (originalBuffer);
-    finish (ja ("中止しました。元の設定に戻しました"));
+    if (phase != Phase::idle)
+        finish (ja ("中止しました。元の設定に戻しました"), Outcome::restore);
 }
 
 void LatencyTuner::beginStep()
@@ -77,7 +90,7 @@ void LatencyTuner::beginStep()
 
         if (sizes[index] != current && engine.setBufferSize (sizes[index]) == 0)
         {
-            finish (ja ("バッファサイズを変更できませんでした"));
+            finish (ja ("バッファサイズを変更できませんでした。元の設定に戻しました"), Outcome::restore);
             return;
         }
 
@@ -98,17 +111,45 @@ void LatencyTuner::beginStep()
 
 bool LatencyTuner::stepIsClean() const
 {
-    const auto load = engine.callback.getLoad();
+    Reading reading;
+
+    if (reader)
+    {
+        reading = reader();
+    }
+    else
+    {
+        const auto load = engine.callback.getLoad();
+        reading = { engine.getOverloads(), load.late, load.maxPercent };
+    }
+
     const auto usagePhase = phase == Phase::usage || phase == Phase::confirmUsage;
     const auto usage = phase == Phase::usage ? usages[usageIndex] : phase == Phase::confirmUsage ? usages[lastCleanUsageIndex] : 1.0f;
     const auto allowed = usagePhase ? jmin (maxLoadPercent, 60.0 * (double) usage) : maxLoadPercent;
-    return isClean (engine.getOverloads(), load.late, load.maxPercent, allowed);
+    return isClean (reading.overloads, reading.late, reading.maxPercent, allowed);
+}
+
+bool LatencyTuner::deviceIsUnchanged() const
+{
+    const auto setup = engine.deviceManager.getAudioDeviceSetup();
+
+    return engine.deviceManager.getCurrentAudioDevice() != nullptr
+        && setup.inputDeviceName == originalSetup.inputDeviceName
+        && setup.outputDeviceName == originalSetup.outputDeviceName;
 }
 
 bool LatencyTuner::tick()
 {
     if (phase == Phase::idle)
         return false;
+
+    // The device is only ever changed by this run's own steps, which keep its names. Anything else
+    // (an unplugged interface, a switch made elsewhere) makes the plan this run started with invalid.
+    if (! deviceIsUnchanged())
+    {
+        finish (ja ("デバイスが変わったため中止しました"), Outcome::abandon);
+        return true;
+    }
 
     if (settleTicks > 0)
     {
@@ -125,6 +166,12 @@ bool LatencyTuner::tick()
     if (--ticksLeft > 0)
         return false;
 
+    advance();
+    return phase == Phase::idle;
+}
+
+void LatencyTuner::advance()
+{
     const auto clean = stepIsClean();
 
     switch (phase)
@@ -144,20 +191,19 @@ bool LatencyTuner::tick()
             {
                 index = next;
                 beginStep();
-                return false;
+                return;
             }
 
             if (lastCleanIndex < 0)
             {
-                engine.setBufferSize (originalBuffer);
-                finish (ja ("どのバッファサイズでも安定しませんでした。元に戻しました"));
-                return true;
+                finish (ja ("どのバッファサイズでも安定しませんでした。元に戻しました"), Outcome::restore);
+                return;
             }
 
             index = lastCleanIndex;
             phase = Phase::confirmBuffer;
             beginStep();
-            return ! isRunning();
+            return;
         }
 
         case Phase::confirmBuffer:
@@ -167,7 +213,7 @@ bool LatencyTuner::tick()
                 phase = Phase::usage;
                 usageIndex = 0;
                 beginStep();
-                return false;
+                return;
             }
 
             // The short check missed a burst: take the next larger size.
@@ -175,13 +221,11 @@ bool LatencyTuner::tick()
             {
                 index = ++lastCleanIndex;
                 beginStep();
-                return ! isRunning();
+                return;
             }
 
-            engine.setBufferSize (originalBuffer);
-            lastCleanIndex = -1;
-            finish (ja ("長く見ると、どのバッファサイズでも音切れが出ました。元に戻しました"));
-            return true;
+            finish (ja ("長く見ると、どのバッファサイズでも音切れが出ました。元に戻しました"), Outcome::restore);
+            return;
         }
 
         case Phase::usage:
@@ -193,65 +237,83 @@ bool LatencyTuner::tick()
                 if (++usageIndex < usages.size())
                 {
                     beginStep();
-                    return false;
+                    return;
                 }
             }
 
             if (lastCleanUsageIndex < 0)
             {
-                finish ({});
-                return true;
+                finish ({}, Outcome::settle);
+                return;
             }
 
             phase = Phase::confirmUsage;
             beginStep();
-            return false;
+            return;
         }
 
         case Phase::confirmUsage:
         {
             if (clean)
             {
-                finish ({});
-                return true;
+                finish ({}, Outcome::settle);
+                return;
             }
 
-            --lastCleanUsageIndex;
-
-            if (lastCleanUsageIndex >= 0)
+            if (--lastCleanUsageIndex >= 0)
             {
                 beginStep();
-                return false;
+                return;
             }
 
-            finish ({});
-            return true;
+            finish ({}, Outcome::settle);
+            return;
         }
 
         case Phase::idle:
             break;
     }
-
-    return false;
 }
 
-void LatencyTuner::finish (const String& reason)
+void LatencyTuner::finish (const String& reason, Outcome outcome)
 {
-    if (lastCleanIndex >= 0 && lastCleanUsageIndex >= 0)
-        engine.setExperiments ({ usages[lastCleanUsageIndex] });
-    else if (lastCleanIndex >= 0)
-        engine.setExperiments ({});
-    else
-        engine.setExperiments (original);
-
     String text = reason;
 
-    if (text.isEmpty() && lastCleanIndex >= 0)
+    if (outcome == Outcome::settle)
+    {
+        auto setup = originalSetup;
+        setup.bufferSize = sizes[lastCleanIndex];
+
+        if (engine.openWithSetup (setup) != 0)
+        {
+            engine.setExperiments (lastCleanUsageIndex >= 0 ? Experiments { usages[lastCleanUsageIndex] } : Experiments {});
+        }
+        else
+        {
+            outcome = Outcome::restore;
+            text = ja ("見つけた設定でデバイスを開けませんでした。元の設定に戻しました");
+        }
+    }
+
+    if (outcome == Outcome::restore)
+    {
+        engine.setExperiments (original);
+
+        if (engine.openWithSetup (originalSetup) == 0)
+            text << ja ("（元のバッファサイズでデバイスを開き直せませんでした）");
+    }
+    else if (outcome == Outcome::abandon)
+    {
+        engine.setExperiments (original);
+    }
+
+    if (text.isEmpty())
     {
         text = ja ("最小遅延: バッファ ") + String (sizes[lastCleanIndex]);
         text << (lastCleanUsageIndex >= 0 ? ja (" / サイクル使用率 ") + String (usages[lastCleanUsageIndex], 2) : ja (" / サイクル使用率は既定のまま"));
     }
 
+    engine.releasePersistedAudio();
     result = text;
     phase = Phase::idle;
     progress.clear();

@@ -1,9 +1,33 @@
 #include "Engine.h"
 
+#include "Text.h"
+
 #include <cmath>
 
 namespace mfx
 {
+
+String describeRateMismatch (double runningRate, double inputRate, double outputRate)
+{
+    const auto differs = [runningRate] (double rate) { return rate > 0.0 && runningRate > 0.0 && std::abs (rate - runningRate) > 0.5; };
+    StringArray parts;
+
+    if (differs (inputRate))
+        parts.add (ja ("入力機器の本来のレートは ") + String (inputRate, 0) + ja (" Hz で、アプリは ") + String (runningRate, 0) + ja (" Hz で動いています"));
+
+    if (differs (outputRate))
+        parts.add (ja ("出力デバイスのレートは ") + String (outputRate, 0) + ja (" Hz で、アプリは ") + String (runningRate, 0) + ja (" Hz で動いています"));
+
+    return parts.isEmpty() ? String() : parts.joinIntoString (" / ") + ja ("。レート変換が入り、遅延と負荷が増えます");
+}
+
+std::optional<float> validCycleUsage (double value)
+{
+    if (std::isnan (value) || value <= 0.0 || value > 1.0)
+        return std::nullopt;
+
+    return (float) value;
+}
 
 Engine::Engine()
 {
@@ -28,6 +52,14 @@ void Engine::openDevices (const XmlElement* deviceSetup)
     deviceManager.initialise (1, 2, deviceSetup != nullptr ? deviceSetup : &noDevice, false);
 }
 
+void Engine::openFromSettings (const XmlElement* settingsRoot)
+{
+    openDevices (settingsRoot != nullptr ? settingsRoot->getChildByName ("DEVICESETUP") : nullptr);
+
+    if (settingsRoot != nullptr && settingsRoot->hasAttribute ("cycleUsage"))
+        setExperiments ({ validCycleUsage (settingsRoot->getDoubleAttribute ("cycleUsage", 0.0)) });
+}
+
 void Engine::start()
 {
     player.setProcessor (&chain.getGraph());
@@ -45,7 +77,7 @@ void Engine::refreshHal()
         overloads.reset();
         aggregate = kAudioObjectUnknown;
         seenStartCount = 0;
-        inputHardwareRate = 0.0;
+        deviceRates = {};
         return;
     }
 
@@ -57,7 +89,8 @@ void Engine::refreshHal()
 
     seenStartCount = startCount;
     aggregate = hal::findJuceAggregate();
-    inputHardwareRate = nominalRateOf (deviceManager.getAudioDeviceSetup().inputDeviceName, true);
+    const auto setup = deviceManager.getAudioDeviceSetup();
+    deviceRates = { nominalRateOf (setup.inputDeviceName, true), nominalRateOf (setup.outputDeviceName, false) };
     overloads.reset();
 
     if (aggregate != kAudioObjectUnknown)
@@ -72,6 +105,10 @@ void Engine::refreshHal()
 void Engine::setExperiments (const Experiments& next)
 {
     experiments = next;
+
+    if (experiments.ioCycleUsage.has_value())
+        experiments.ioCycleUsage = validCycleUsage ((double) *experiments.ioCycleUsage);
+
     applyExperiments();
 }
 
@@ -93,12 +130,53 @@ int Engine::setBufferSize (int frames)
 {
     auto setup = deviceManager.getAudioDeviceSetup();
     setup.bufferSize = frames;
+    return openWithSetup (setup);
+}
 
-    if (deviceManager.setAudioDeviceSetup (setup, false).isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr)
-        return 0;
-
+int Engine::openWithSetup (const AudioDeviceManager::AudioDeviceSetup& setup)
+{
+    const auto failed = deviceManager.setAudioDeviceSetup (setup, false).isNotEmpty();
     refreshHal();
-    return deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples();
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+    return failed || device == nullptr ? 0 : device->getCurrentBufferSizeSamples();
+}
+
+AudioSettings Engine::getPersistedAudio() const
+{
+    AudioSettings result;
+
+    if (held.has_value())
+    {
+        if (held->device != nullptr)
+            result.device = std::make_unique<XmlElement> (*held->device);
+
+        result.cycleUsage = held->cycleUsage;
+        return result;
+    }
+
+    result.device = deviceManager.createStateXml();
+
+    if (result.device != nullptr)
+        if (auto* device = deviceManager.getCurrentAudioDevice())
+            result.device->setAttribute ("audioDeviceBufferSize", device->getCurrentBufferSizeSamples());
+
+    result.cycleUsage = experiments.ioCycleUsage;
+    return result;
+}
+
+void Engine::holdPersistedAudio()
+{
+    if (held.has_value())
+        return;
+
+    auto now = getPersistedAudio();
+    held = Held { std::move (now.device), now.cycleUsage };
+}
+
+void Engine::releasePersistedAudio()
+{
+    held.reset();
 }
 
 double Engine::nominalRateOf (const String& deviceName, bool input)
@@ -108,7 +186,8 @@ double Engine::nominalRateOf (const String& deviceName, bool input)
 }
 
 ScopedSetup::ScopedSetup (Engine& e)
-    : engine (e), saved (e.deviceManager.createStateXml()), experiments (e.getExperiments())
+    : engine (e), saved (e.deviceManager.getAudioDeviceSetup()),
+      hadDevice (e.deviceManager.getCurrentAudioDevice() != nullptr), experiments (e.getExperiments())
 {
 }
 
@@ -118,8 +197,8 @@ ScopedSetup::~ScopedSetup()
     engine.chain.setForceBypassAll (false);
     engine.setExperiments (experiments);
 
-    if (saved != nullptr)
-        engine.deviceManager.initialise (1, 2, saved.get(), false);
+    if (hadDevice)
+        engine.openWithSetup (saved);
 }
 
 } // namespace mfx

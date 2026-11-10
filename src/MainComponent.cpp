@@ -223,11 +223,7 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     // Without saved settings, initialise() would open the system default devices. An empty setup
     // keeps every device closed until the user picks one: a mic wired straight to the speakers
     // on first launch would feed back.
-    auto* savedDevice = settings != nullptr ? settings->getChildByName ("DEVICESETUP") : nullptr;
-    engine.openDevices (savedDevice);
-
-    if (settings != nullptr && settings->hasAttribute ("cycleUsage"))
-        engine.setExperiments ({ (float) settings->getDoubleAttribute ("cycleUsage") });
+    engine.openFromSettings (settings.get());
 
     bool skippedChainAfterCrash = false;
 
@@ -315,6 +311,9 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
 MainComponent::~MainComponent()
 {
     stopTimer();
+
+    // A run that is cut short puts the original buffer and cycle usage back before anything is written.
+    tuner.cancel();
     persist();
     closeAllEditors();
     deviceManager.removeChangeListener (this);
@@ -416,6 +415,9 @@ void MainComponent::setTheme (const String& id)
 //==============================================================================
 bool MainComponent::isInterestedInFileDrag (const StringArray& files)
 {
+    if (tuner.isRunning())
+        return false;
+
     for (auto& path : files)
         if (File (path).hasFileExtension ("vst3"))
             return true;
@@ -477,6 +479,13 @@ void MainComponent::addPluginFiles (const Array<File>& files)
 
 void MainComponent::addDescription (const PluginDescription& description)
 {
+    // A file chooser or menu that was already open can still deliver a plugin while MIN LATENCY runs.
+    if (tuner.isRunning())
+    {
+        showStatus (ja ("MIN LATENCY の実行中はプラグインを追加できません"));
+        return;
+    }
+
     String error;
 
     if (chain.add (description, error))
@@ -572,34 +581,42 @@ void MainComponent::startTuning()
     if (tuner.isRunning())
     {
         tuner.cancel();
+        tuningEnded();
+        return;
     }
+
+    showStatus ({});
+    tuner.start();
+
+    if (tuner.isRunning())
+        tuningStateChanged();
     else
-    {
-        showStatus ({});
-        tuner.start();
+        tuningEnded();
+}
 
-        if (! tuner.isRunning())
-            showStatus (tuner.getResult());
-    }
+// The run changes the device underneath the window, so what it measured is only valid for the setup
+// it started with: the device selector and everything that edits the chain are off until it ends.
+void MainComponent::tuningStateChanged()
+{
+    const auto tuning = tuner.isRunning();
 
-    minLatencyButton.setButtonText (tuner.isRunning() ? ja ("中止") : "MIN LATENCY");
+    minLatencyButton.setButtonText (tuning ? ja ("中止") : "MIN LATENCY");
+    deviceSelector.setEnabled (! tuning);
+    addButton.setEnabled (! tuning);
+    chainList.setEnabled (! tuning);
     refreshStatus();
+}
+
+void MainComponent::tuningEnded()
+{
+    tuningStateChanged();
+    showStatus (tuner.getResult());
+    persist();
 }
 
 void MainComponent::persist()
 {
-    XmlElement root ("MIC_FX_HOST");
-    writeThemeId (root, themeId);
-
-    if (auto device = deviceManager.createStateXml())
-        root.addChildElement (device.release());
-
-    if (const auto usage = engine.getExperiments().ioCycleUsage)
-        root.setAttribute ("cycleUsage", (double) *usage);
-
-    root.addChildElement (chain.toXml().release());
-
-    if (! saveSettings (root))
+    if (! saveSettings (*buildSettingsXml (themeId, engine)))
         showStatus (ja ("設定ファイルを保存できませんでした: ") + getSettingsFile().getFullPathName());
 
     ticksSinceSave = 0;
@@ -624,7 +641,7 @@ void MainComponent::updateReadout()
         const auto outLatency = device->getOutputLatencyInSamples();
         const auto pluginLatency = chain.getGraph().getLatencySamples();
         const auto load = engine.callback.getLoad();
-        const auto hardwareRate = engine.getInputHardwareRate();
+        const auto rates = engine.getDeviceRates();
         const auto setup = deviceManager.getAudioDeviceSetup();
         const auto totalSamples = inLatency + outLatency + pluginLatency;
 
@@ -650,19 +667,18 @@ void MainComponent::updateReadout()
 
         text << "\n";
 
-        standingWarning = hardwareRate > 0.0 && std::abs (hardwareRate - sampleRate) > 0.5
-                        ? ja ("入力機器の本来のレートは ") + String (hardwareRate, 0) + ja (" Hz で、アプリは ") + String (sampleRate, 0)
-                            + ja (" Hz で動いています。レート変換が入り、遅延と負荷が増えます")
-                        : String();
+        standingWarning = describeRateMismatch (sampleRate, rates.input, rates.output);
 
         if (device->getActiveInputChannels().isZero())
             text << ja ("入力チャンネルが選ばれていません。\n");
     }
 
+    // A bypassed slot is out of the path, so it counts 0 here like it does in the total above.
     for (int i = 0; i < chain.size(); ++i)
         if (chain[i].isLive())
             text << "  " << (i + 1) << ". " << chain[i].description.name << " : "
-                 << chain[i].node->getProcessor()->getLatencySamples() << " samples\n";
+                 << (chain[i].bypassed ? 0 : chain[i].node->getProcessor()->getLatencySamples()) << " samples"
+                 << (chain[i].bypassed ? ja (" (バイパス中)") : String()) << "\n";
 
     lcd.setContent ({ "TOTAL LATENCY", bigValue, "ms", text.trimEnd() });
     refreshStatus();
@@ -679,11 +695,7 @@ void MainComponent::updateReadout()
 void MainComponent::timerCallback()
 {
     if (tuner.isRunning() && tuner.tick())
-    {
-        minLatencyButton.setButtonText ("MIN LATENCY");
-        showStatus (tuner.getResult());
-        persist();
-    }
+        tuningEnded();
 
     updateReadout();
 

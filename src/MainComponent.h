@@ -52,6 +52,8 @@ private:
     void refreshStatus();
     void updateReadout();
     void startTuning();
+    void tuningStateChanged();
+    void tuningEnded();
     void persist();
 
     void timerCallback() override;

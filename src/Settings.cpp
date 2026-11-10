@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "Engine.h"
 #include "Product.h"
 
 #include <climits>
@@ -98,6 +99,23 @@ String readThemeId (const XmlElement& root)
 void writeThemeId (XmlElement& root, const String& id)
 {
     root.setAttribute ("theme", id);
+}
+
+std::unique_ptr<XmlElement> buildSettingsXml (const String& themeId, const Engine& engine)
+{
+    auto root = std::make_unique<XmlElement> ("MIC_FX_HOST");
+    writeThemeId (*root, themeId);
+
+    auto audio = engine.getPersistedAudio();
+
+    if (audio.device != nullptr)
+        root->addChildElement (audio.device.release());
+
+    if (audio.cycleUsage.has_value())
+        root->setAttribute ("cycleUsage", (double) *audio.cycleUsage);
+
+    root->addChildElement (engine.chain.toXml().release());
+    return root;
 }
 
 std::unique_ptr<XmlElement> loadSettings()
