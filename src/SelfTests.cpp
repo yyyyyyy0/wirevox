@@ -993,7 +993,7 @@ int selfTestBreakdown()
 
         check (marked == 1, "exactly one row carries the mark");
 
-        // The measured excess of this Mac's Loopback device (768 samples = 17.415 ms) next to the host's declared 3.107 ms.
+        // The measured excess of a Loopback virtual device (768 samples = 17.415 ms) next to the host's declared 3.107 ms.
         BreakdownInput loopback;
         loopback.sampleRate = 44100.0;
         loopback.aggregate = numbers;
@@ -1002,7 +1002,7 @@ int selfTestBreakdown()
         check (measured.rows.size() == 5 && measured.rows[4].known && measured.rows[4].measured && std::abs (measured.rows[4].ms - 17.415) < 1.0e-9, "with a measurement the excess row is known and measured");
         check (measured.rows[4].samples == 768, "17.415 ms at 44.1 kHz is 768 samples");
         check (measured.declaredSamples == 137 && std::abs (measured.declaredMs - 3.107) < 0.001, "the declared part is still 137 samples = 3.107 ms");
-        check (std::abs (measured.totalMs - 20.522) < 0.001, "the total is 20.522 ms, what --measure found on this Mac");
+        check (std::abs (measured.totalMs - 20.522) < 0.001, "the total is 20.522 ms, the README example");
         check (measured.largest == 4 && measured.rows[4].isLargest, "the largest row is the virtual device's excess");
 
         // Marks follow the milliseconds, and the first of equal rows wins.
@@ -1042,10 +1042,10 @@ int selfTestBreakdown()
 
     //==========================================================================
     {
-        ExcessRecord record { "fxhost out", 44100.0, 17.415, 6, Time::getCurrentTime() };
+        ExcessRecord record { "Virtual Out", 44100.0, 17.415, 6, Time::getCurrentTime() };
         check (isUsable (record), "a complete record is usable");
-        check (excessApplies (record, "fxhost out", 44100.0) && excessApplies (record, "fxhost out", 44100.3), "it applies to the same device and rate");
-        check (! excessApplies (record, "fxhost out", 48000.0) && ! excessApplies (record, "Discord out", 44100.0), "not to another rate or another device");
+        check (excessApplies (record, "Virtual Out", 44100.0) && excessApplies (record, "Virtual Out", 44100.3), "it applies to the same device and rate");
+        check (! excessApplies (record, "Virtual Out", 48000.0) && ! excessApplies (record, "Other Out", 44100.0), "not to another rate or another device");
 
         auto broken = record;
         broken.excessMs = std::nan ("");
@@ -1068,18 +1068,18 @@ int selfTestBreakdown()
         result.trustworthyRuns = 5;
         result.excess.median = 17.4;
         const auto now = Time::getCurrentTime();
-        const auto made = measure::makeExcessRecord (result, "fxhost out", now);
-        check (made.has_value() && made->runs == 5 && std::abs (made->excessMs - 17.4) < 1.0e-9 && made->outputDevice == "fxhost out" && made->measuredAt == now, "a finished measurement becomes a record");
+        const auto made = measure::makeExcessRecord (result, "Virtual Out", now);
+        check (made.has_value() && made->runs == 5 && std::abs (made->excessMs - 17.4) < 1.0e-9 && made->outputDevice == "Virtual Out" && made->measuredAt == now, "a finished measurement becomes a record");
         result.trustworthyRuns = 2;
-        check (! measure::makeExcessRecord (result, "fxhost out", now).has_value(), "fewer than three trusted runs make none");
+        check (! measure::makeExcessRecord (result, "Virtual Out", now).has_value(), "fewer than three trusted runs make none");
         result.trustworthyRuns = 5;
         result.problem = "x";
-        check (! measure::makeExcessRecord (result, "fxhost out", now).has_value(), "a failed measurement makes none");
+        check (! measure::makeExcessRecord (result, "Virtual Out", now).has_value(), "a failed measurement makes none");
         result.problem = {};
         result.excess.median = -0.01;
-        check (measure::makeExcessRecord (result, "fxhost out", now)->excessMs == 0.0, "a median a hair below zero (noise on a device that adds nothing) is kept as 0");
+        check (measure::makeExcessRecord (result, "Virtual Out", now)->excessMs == 0.0, "a median a hair below zero (noise on a device that adds nothing) is kept as 0");
         result.excess.median = -3.0;
-        check (! measure::makeExcessRecord (result, "fxhost out", now).has_value(), "a clearly negative median (wrong timing) makes none");
+        check (! measure::makeExcessRecord (result, "Virtual Out", now).has_value(), "a clearly negative median (wrong timing) makes none");
     }
 
     //==========================================================================
@@ -1123,7 +1123,7 @@ int selfTestBreakdown()
         {
             Rig rig (settingsText (64));
             auto other = record;
-            other.outputDevice = "Discord out";
+            other.outputDevice = "Other Out";
             rig.engine.setExcess (other);
             check (! rig.engine.getExcess().has_value(), "a result for another output device is not returned");
             check (rig.persist() && ! readFile().contains ("LATENCY_EXCESS"), "and never written");
@@ -1250,7 +1250,7 @@ int selfTestMonitor()
         const auto absent = readMonitor (none);
         check (! absent.enabled && absent.device.isEmpty() && absent.firstChannel == 0, "a settings file without a MONITOR element loads as monitor off");
 
-        for (const auto& plan : { MonitorPlan { true, "Discrete4_Pro_SC", 30 }, MonitorPlan { false, "FakeMon", 4 }, MonitorPlan { true, "Dev \"quoted\" & <x>", 0 } })
+        for (const auto& plan : { MonitorPlan { true, "Interface 32", 30 }, MonitorPlan { false, "FakeMon", 4 }, MonitorPlan { true, "Dev \"quoted\" & <x>", 0 } })
         {
             XmlElement root ("MIC_FX_HOST");
             writeMonitor (root, plan);
