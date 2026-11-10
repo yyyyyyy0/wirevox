@@ -63,7 +63,7 @@ public:
         metrics.numberWidth = 28;
         metrics.indicatorWidth = 32;
         metrics.scrollbarWidth = 12;
-        metrics.buttons = { 54, 46, 46, 54, 86 };
+        metrics.buttons = { 46, 46, 46, 46, 86 };
 
         applyScheme ({ Palette::black, Palette::green, Palette::dim, Palette::black, Colours::transparentBlack,
                        Colours::transparentBlack, Palette::green, Palette::black, Palette::green, Palette::black });
@@ -80,6 +80,8 @@ public:
     {
         return toggledOn ? "[x " + text + "]" : "[ " + text + " ]";
     }
+
+    String iconFrameText() const override { return "[   ]"; }
 
     Colour getButtonTextColour (const Button&, const ControlState& state) const override
     {

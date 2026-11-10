@@ -108,7 +108,7 @@ public:
         metrics.numberWidth = 30;
         metrics.indicatorWidth = 2;
         metrics.scrollbarWidth = 12;
-        metrics.buttons = { 52, 34, 34, 52, 74 };
+        metrics.buttons = { 38, 38, 38, 38, 74 };
 
         applyScheme ({ Palette::skyBottom, Palette::text, Palette::textDim, Palette::panel, Palette::cyan, Palette::magenta,
                        Palette::cyan, Palette::onNeon, Palette::text, Palette::onNeon });

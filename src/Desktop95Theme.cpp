@@ -67,7 +67,7 @@ public:
         metrics.indicatorWidth = 16;
         metrics.controlHeight = 24;
         metrics.scrollbarWidth = 16;
-        metrics.buttons = { 46, 30, 30, 46, 92 };
+        metrics.buttons = { 34, 34, 34, 34, 92 };
 
         applyScheme ({ Palette::face, Colours::black, Palette::shadow, Palette::white, Palette::face, Palette::face,
                        Palette::navy, Palette::white, Colours::black, Colours::black });

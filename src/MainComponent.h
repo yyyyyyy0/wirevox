@@ -73,6 +73,7 @@ private:
     ui::StatusStrip status;
     ComboBox themeSelector;
     std::unique_ptr<Overlay> overlay;
+    TooltipWindow tooltips { this };
 
     Rectangle<int> logoStrip, deviceTitle, deviceFrame, chainTitle, chainFrame;
 

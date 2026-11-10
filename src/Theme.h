@@ -50,8 +50,15 @@ struct ThemeMetrics
     int indicatorWidth = 14;
     int controlHeight = 26;
     int scrollbarWidth = 14;
-    ButtonWidths buttons { 46, 30, 30, 46, 68 };
+    ButtonWidths buttons { 34, 34, 34, 34, 68 };
 };
+
+// A key that shows a drawn symbol instead of its text. The text stays on the button for tooltips
+// and accessibility.
+enum class KeyIcon { none, edit, up, down, remove };
+
+void setKeyIcon (Button&, KeyIcon);
+KeyIcon getKeyIcon (const Button&);
 
 struct ControlState
 {
@@ -140,6 +147,10 @@ public:
     virtual Colour getButtonTextColour (const Button&, const ControlState&) const;
     virtual String decorateButtonText (const String& text, bool toggledOn) const { ignoreUnused (toggledOn); return text; }
     virtual int getPressedTextShift() const { return 1; }
+
+    // `box` is a square centred on the key. iconFrameText() is drawn behind it (the terminal's brackets).
+    virtual void paintKeyIcon (Graphics&, KeyIcon, Rectangle<float> box, Colour);
+    virtual String iconFrameText() const { return {}; }
 
     //==============================================================================
     Font getTextButtonFont (TextButton&, int buttonHeight) override;

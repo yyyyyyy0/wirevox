@@ -114,12 +114,80 @@ Colour Theme::getButtonTextColour (const Button& button, const ControlState& sta
     return button.findColour (state.toggledOn ? TextButton::textColourOnId : TextButton::textColourOffId);
 }
 
+void setKeyIcon (Button& button, KeyIcon icon)
+{
+    button.getProperties().set ("keyIcon", (int) icon);
+}
+
+KeyIcon getKeyIcon (const Button& button)
+{
+    return (KeyIcon) (int) button.getProperties().getWithDefault ("keyIcon", (int) KeyIcon::none);
+}
+
+void Theme::paintKeyIcon (Graphics& g, KeyIcon icon, Rectangle<float> box, Colour colour)
+{
+    const auto unit = box.getWidth();
+    const auto stroke = PathStrokeType (jmax (1.6f, unit * 0.15f), PathStrokeType::mitered, PathStrokeType::butt);
+    const auto at = [&box, unit] (float x, float y) { return Point<float> (box.getX() + x * unit, box.getY() + y * unit); };
+
+    g.setColour (colour);
+    Path path;
+
+    switch (icon)
+    {
+        case KeyIcon::up:
+            path.addTriangle (at (0.5f, 0.14f), at (0.94f, 0.82f), at (0.06f, 0.82f));
+            g.fillPath (path);
+            break;
+
+        case KeyIcon::down:
+            path.addTriangle (at (0.06f, 0.18f), at (0.94f, 0.18f), at (0.5f, 0.86f));
+            g.fillPath (path);
+            break;
+
+        case KeyIcon::remove:
+            path.addLineSegment ({ at (0.12f, 0.12f), at (0.88f, 0.88f) }, 0.0f);
+            path.addLineSegment ({ at (0.88f, 0.12f), at (0.12f, 0.88f) }, 0.0f);
+            g.strokePath (path, stroke);
+            break;
+
+        case KeyIcon::edit:
+        {
+            // Mixer faders: three tracks, each with its knob at a different position.
+            const float knobs[] = { 0.3f, 0.72f, 0.45f };
+
+            for (int i = 0; i < 3; ++i)
+            {
+                const auto y = 0.16f + 0.34f * (float) i;
+                g.drawLine ({ at (0.0f, y), at (1.0f, y) }, jmax (1.2f, unit * 0.09f));
+                g.fillEllipse (Rectangle<float> (unit * 0.3f, unit * 0.3f).withCentre (at (knobs[i], y)));
+            }
+
+            break;
+        }
+
+        case KeyIcon::none:
+            break;
+    }
+}
+
 void Theme::paintKeyLabel (Graphics& g, Button& button, const ControlState& state)
 {
-    g.setFont (Font (getUiFont (jmin (13.0f, (float) button.getHeight() * 0.5f), true)));
-    g.setColour (getButtonTextColour (button, state).withMultipliedAlpha (state.enabled ? 1.0f : 0.45f));
-
+    const auto colour = getButtonTextColour (button, state).withMultipliedAlpha (state.enabled ? 1.0f : 0.45f);
     const auto area = button.getLocalBounds().reduced (3, 2).translated (0, state.pressed() ? getPressedTextShift() : 0);
+
+    g.setFont (Font (getUiFont (jmin (13.0f, (float) button.getHeight() * 0.5f), true)));
+    g.setColour (colour);
+
+    if (const auto icon = getKeyIcon (button); icon != KeyIcon::none)
+    {
+        g.drawFittedText (iconFrameText(), area, Justification::centred, 1);
+
+        const auto size = jmin (13.0f, (float) button.getHeight() * 0.48f);
+        paintKeyIcon (g, icon, Rectangle<float> (size, size).withCentre (area.toFloat().getCentre()), colour);
+        return;
+    }
+
     g.drawFittedText (decorateButtonText (button.getButtonText(), state.toggledOn), area, Justification::centred, 1);
 }
 

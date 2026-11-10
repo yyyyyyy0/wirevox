@@ -68,6 +68,17 @@ public:
         up.onClick     = [this] { owner.moveSlot (row, -1); };
         down.onClick   = [this] { owner.moveSlot (row, 1); };
         remove.onClick = [this] { owner.removeSlot (row); };
+
+        const auto asIcon = [] (Button& button, ui::KeyIcon icon, const String& tooltip)
+        {
+            ui::setKeyIcon (button, icon);
+            button.setTooltip (tooltip);
+        };
+
+        asIcon (editor, ui::KeyIcon::edit, ja ("プラグインの画面を開く"));
+        asIcon (up, ui::KeyIcon::up, ja ("上へ移動"));
+        asIcon (down, ui::KeyIcon::down, ja ("下へ移動"));
+        asIcon (remove, ui::KeyIcon::remove, ja ("削除"));
     }
 
     void update (int newRow)
