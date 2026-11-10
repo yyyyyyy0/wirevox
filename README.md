@@ -114,7 +114,7 @@ IO サイクル使用率（`kAudioDevicePropertyIOCycleUsage`）は、合成デ�
 
 各行に samples と ms、バーを出し、いちばん大きい行に「ここが最大」の印と色の帯を付けます。申告の行は枠だけのタグ（申告）と塗りのバー、実測の行は塗りのタグ（実測）と斜線のバーで、色がなくても見分けられます。合計は、超過分が未計測のあいだは「超過分を除く」と書きます。4 つのテーマ（RACK '84 / TERMINAL / DESKTOP '95 / NEON）とも、パネルの枠はテーマのもの、文字と印の色はテーマの配色（文字色と選択色）を使います。
 
-計算は `src/Breakdown.cpp` の `declareHost()`（HAL の数字を足す）と `computeBreakdown()`（行にする。画面に依存しない純粋な関数）の 1 か所だけです。数字は `Engine::getAggregateNumbers()` と `Engine::getCycleUsage()` から来ます。`--measure` の `declared`（HAL の時刻から出す値）と同じ区間で、IO サイクル使用率が既定の 1.0 のとき一致します（44.1 kHz、64 サンプルで 64 + 64 + 5 + 4 = 137 サンプル = 3.107 ms。`--selftest-timing` が確かめます）。`--measure` は、同じ関数が出した値を `HAL numbers declare ...` の行にも出します。使用率を下げているときは出力バッファを使用率倍で数えるので（「MIN LATENCY」の節）、上の LCD の「合計」（JUCE の値で、使用率を見ない）より小さく出ます。
+計算は `src/Breakdown.cpp` の `declareHost()`（HAL の数字を足す）と `computeBreakdown()`（行にする。画面に依存しない純粋な関数）の 1 か所だけです。数字は `Engine::getAggregateNumbers()` と `Engine::getCycleUsage()` から来ます。`--measure` の `declared`（HAL の時刻から出す値）と同じ区間で、IO サイクル使用率が既定の 1.0 のとき一致します（44.1 kHz、64 サンプルで 64 + 64 + 5 + 4 = 137 サンプル = 3.107 ms。`--selftest-timing` が確かめます）。`--measure` は、同じ関数が出した値を `HAL numbers declare ...` の行にも出します。使用率を下げているときは、出力バッファを使用率倍で数えます（「MIN LATENCY」の節）。LCD の大きな数字と「合計」も同じ計算結果を使うので、パネルの合計と一致します。超過分を計測済みなら、どちらもそれを含みます。
 
 ### 仮想デバイスの計測
 

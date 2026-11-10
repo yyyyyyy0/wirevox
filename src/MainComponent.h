@@ -53,7 +53,7 @@ private:
     void showStatus (const String&);
     void refreshStatus();
     void updateReadout();
-    void updateBreakdown();
+    std::optional<Breakdown> updateBreakdown();
     void startTuning();
     void tuningEnded();
     void askToMeasure();

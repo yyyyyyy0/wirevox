@@ -746,10 +746,13 @@ void MainComponent::updateReadout()
 {
     engine.refreshHal();
 
+    // The readout prints the panel's own numbers, so the two totals cannot disagree.
+    const auto latency = updateBreakdown();
+
     String text, bigValue = "--.--";
     auto* device = deviceManager.getCurrentAudioDevice();
 
-    if (device == nullptr)
+    if (device == nullptr || ! latency.has_value())
     {
         standingWarning.clear();
         text << ja ("オーディオデバイスが開いていません。\n左のパネルで入力・出力デバイスを選んでください。\n");
@@ -757,16 +760,14 @@ void MainComponent::updateReadout()
     else
     {
         const auto sampleRate = device->getCurrentSampleRate();
-        const auto inLatency = device->getInputLatencyInSamples();
-        const auto outLatency = device->getOutputLatencyInSamples();
-        const auto pluginLatency = chain.getGraph().getLatencySamples();
+        const auto sides = sumSides (*latency);
+        const auto excess = engine.getExcess();
         const auto load = engine.callback.getLoad();
         const auto rates = engine.getDeviceRates();
         const auto setup = deviceManager.getAudioDeviceSetup();
-        const auto totalSamples = inLatency + outLatency + pluginLatency;
 
         if (sampleRate > 0)
-            bigValue = String (1000.0 * totalSamples / sampleRate, 2);
+            bigValue = String (latency->totalMs, 2);
 
         text << ja ("入力デバイス: ") << setup.inputDeviceName << "  ("
              << device->getActiveInputChannels().countNumberOfSetBits() << " ch)\n"
@@ -774,11 +775,17 @@ void MainComponent::updateReadout()
              << device->getActiveOutputChannels().countNumberOfSetBits() << " ch)\n"
              << ja ("サンプルレート: ") << String (sampleRate, 0) << " Hz\n"
              << ja ("バッファサイズ: ") << samplesAndMs (device->getCurrentBufferSizeSamples(), sampleRate) << "\n"
-             << ja ("入力デバイス遅延（バッファ込み）: ") << samplesAndMs (inLatency, sampleRate) << "\n"
-             << ja ("出力デバイス遅延（バッファ込み）: ") << samplesAndMs (outLatency, sampleRate) << "\n"
-             << ja ("プラグイン遅延合計: ") << samplesAndMs (pluginLatency, sampleRate) << "\n"
-             << ja ("合計: ") << samplesAndMs (totalSamples, sampleRate) << "\n"
-             << ja ("負荷（コールバックの所要時間 / バッファ時間）: 平均 ") << String (load.meanPercent, 1) << " % / "
+             << ja ("入力デバイス遅延（バッファ込み）: ") << samplesAndMs (sides.input, sampleRate) << "\n"
+             << ja ("出力デバイス遅延（バッファ込み）: ") << samplesAndMs (sides.output, sampleRate) << "\n"
+             << ja ("プラグイン遅延合計: ") << samplesAndMs (sides.plugins, sampleRate) << "\n";
+
+        if (excess.has_value())
+            text << ja ("出力デバイスの実測超過分: ") << String (excess->excessMs, 2) << " ms\n"
+                 << ja ("合計: ") << String (latency->totalMs, 2) << " ms\n";
+        else
+            text << ja ("合計（出力デバイスの超過分を除く）: ") << samplesAndMs (latency->declaredSamples, sampleRate) << "\n";
+
+        text << ja ("負荷（コールバックの所要時間 / バッファ時間）: 平均 ") << String (load.meanPercent, 1) << " % / "
              << ja ("最大 ") << String (load.maxPercent, 1) << " %\n"
              << ja ("オーバーロード: ") << engine.getOverloads() << ja ("  遅れたコールバック: ") << (int) load.late;
 
@@ -801,7 +808,6 @@ void MainComponent::updateReadout()
                  << (chain[i].bypassed ? ja (" (バイパス中)") : String()) << "\n";
 
     lcd.setContent ({ "TOTAL LATENCY", bigValue, "ms", text.trimEnd() });
-    updateBreakdown();
     refreshStatus();
 
     const auto preferred = lcd.getPreferredHeight (lcd.getWidth());
@@ -813,8 +819,9 @@ void MainComponent::updateReadout()
     }
 }
 
-void MainComponent::updateBreakdown()
+std::optional<Breakdown> MainComponent::updateBreakdown()
 {
+    std::optional<Breakdown> latency;
     ui::BreakdownView view;
     auto* device = deviceManager.getCurrentAudioDevice();
     view.deviceOpen = device != nullptr;
@@ -865,6 +872,7 @@ void MainComponent::updateBreakdown()
             view.loads[(size_t) heaviest].heaviest = true;
 
         view.latency = computeBreakdown (input);
+        latency = view.latency;
     }
 
     breakdown.setView (view);
@@ -878,6 +886,8 @@ void MainComponent::updateBreakdown()
         lastBreakdownHeight = preferred;
         resized();
     }
+
+    return latency;
 }
 
 void MainComponent::timerCallback()

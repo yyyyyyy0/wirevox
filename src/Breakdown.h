@@ -95,6 +95,17 @@ struct Breakdown
 
 Breakdown computeBreakdown (const BreakdownInput&);
 
+// The declared rows added up per side, for the readout that prints one line each for input, plugins and
+// output. The three add up to `declaredSamples`.
+struct SideSums
+{
+    int input = 0;              // input device + input buffer
+    int plugins = 0;
+    int output = 0;             // output buffer + safety + output device, without the measured excess
+};
+
+SideSums sumSides (const Breakdown&);
+
 // Index of the row with the most milliseconds among the known ones (the first of equals), or -1 when
 // none is above zero.
 int findLargestRow (const std::vector<BreakdownRow>&);

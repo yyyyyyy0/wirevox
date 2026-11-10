@@ -107,4 +107,24 @@ Breakdown computeBreakdown (const BreakdownInput& in)
     return result;
 }
 
+SideSums sumSides (const Breakdown& breakdown)
+{
+    SideSums sums;
+
+    for (const auto& row : breakdown.rows)
+    {
+        switch (row.kind)
+        {
+            case RowKind::inputDevice:
+            case RowKind::inputBuffer:   sums.input += row.samples; break;
+            case RowKind::plugin:        sums.plugins += row.samples; break;
+            case RowKind::outputBuffer:
+            case RowKind::outputDevice:  sums.output += row.samples; break;
+            case RowKind::outputExcess:  break;
+        }
+    }
+
+    return sums;
+}
+
 } // namespace mfx

@@ -1025,6 +1025,13 @@ int selfTestBreakdown()
         const auto low = computeBreakdown (quarter);
         check (low.declaredSamples == 5 + 64 + 16 + 4, "cycle usage 0.25: " + String (low.declaredSamples) + " samples");
 
+        // The readout's three lines come from the same rows, so they follow the cycle usage too.
+        const auto sides = sumSides (unmeasured);
+        check (sides.input == 69 && sides.plugins == 1024 && sides.output == 68, "sides: input 5 + 64, plugins 1024 (the bypassed one counts 0), output 64 + 4");
+        check (sides.input + sides.plugins + sides.output == unmeasured.declaredSamples, "the sides add up to the declared total");
+        const auto lowSides = sumSides (low);
+        check (lowSides.output == 16 + 4 && lowSides.input == 69 && lowSides.plugins == 0, "at cycle usage 0.25 the output side is 16 + 4, and the measured excess is in no side");
+
         check (unmeasured.rows[1].label == ja ("入力バッファ") && unmeasured.rows[1].label.length() == 6, "labels go through ja(): six characters, not eighteen bytes read as Latin-1");
     }
 
