@@ -170,12 +170,12 @@ void Session::releaseEverything()
 
 bool Session::start()
 {
+    if (isRunning())
+        return false;
+
     result = {};
     armed = 0;
     analysed = false;
-
-    if (isRunning())
-        return false;
 
     device = engine.deviceManager.getCurrentAudioDevice();
 
@@ -421,6 +421,10 @@ Result runSession (Engine& engine, const Options& options)
 std::optional<ExcessRecord> makeExcessRecord (const Result& r, const String& outputDevice, juce::Time now, int minRuns)
 {
     if (r.problem.isNotEmpty() || r.trustworthyRuns < minRuns || outputDevice.isEmpty() || r.sampleRate <= 0.0)
+        return std::nullopt;
+
+    // A hair below zero is noise on a device that adds nothing; clearly negative means the timing was wrong.
+    if (r.excess.median < -0.5)
         return std::nullopt;
 
     ExcessRecord record;

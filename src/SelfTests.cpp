@@ -1066,6 +1066,8 @@ int selfTestBreakdown()
         result.problem = {};
         result.excess.median = -0.01;
         check (measure::makeExcessRecord (result, "fxhost out", now)->excessMs == 0.0, "a median a hair below zero (noise on a device that adds nothing) is kept as 0");
+        result.excess.median = -3.0;
+        check (! measure::makeExcessRecord (result, "fxhost out", now).has_value(), "a clearly negative median (wrong timing) makes none");
     }
 
     //==========================================================================
