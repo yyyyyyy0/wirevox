@@ -1,13 +1,69 @@
 #include "Settings.h"
+#include "Product.h"
 
 namespace mfx
 {
 using namespace juce;
 
+namespace
+{
+    File settingsFileOverride;
+
+    File home()
+    {
+        return File::getSpecialLocation (File::userHomeDirectory);
+    }
+
+    File settingsFileIn (const File& homeDirectory, const String& folder)
+    {
+        return homeDirectory.getChildFile ("Library/Application Support").getChildFile (folder).getChildFile ("settings.xml");
+    }
+}
+
+File defaultSettingsFile (const File& homeDirectory)
+{
+    return settingsFileIn (homeDirectory, productName);
+}
+
+File legacySettingsFile (const File& homeDirectory)
+{
+    return settingsFileIn (homeDirectory, legacyProductName);
+}
+
+Migration migrateLegacySettings (const File& homeDirectory)
+{
+    const auto target = defaultSettingsFile (homeDirectory);
+    const auto legacy = legacySettingsFile (homeDirectory);
+
+    if (target.exists() || ! legacy.existsAsFile())
+        return Migration::notNeeded;
+
+    if (! target.getParentDirectory().createDirectory())
+        return Migration::failed;
+
+    // A half-copied file would be taken for the real settings on the next launch.
+    TemporaryFile temp (target);
+
+    if (! legacy.copyFileTo (temp.getFile()) || ! temp.overwriteTargetFileWithTemporary())
+        return Migration::failed;
+
+    return Migration::copied;
+}
+
+void useSettingsFile (const File& file)
+{
+    settingsFileOverride = file;
+}
+
+void migrateLegacySettingsIfNeeded()
+{
+    if (settingsFileOverride == File())
+        migrateLegacySettings (home());
+}
+
 File getSettingsFile()
 {
-    return File::getSpecialLocation (File::userHomeDirectory)
-               .getChildFile ("Library/Application Support/mic-fx-host/settings.xml");
+    return settingsFileOverride != File() ? settingsFileOverride : defaultSettingsFile (home());
 }
 
 std::unique_ptr<XmlElement> loadSettings()

@@ -173,6 +173,7 @@ MainComponent::MainComponent()
 {
     addDefaultFormatsToManager (formatManager);
 
+    migrateLegacySettingsIfNeeded();
     const auto settings = loadSettings();
     StringArray restoreProblems;
 

@@ -1,5 +1,7 @@
 #include "CommandLine.h"
 #include "Chain.h"
+#include "Product.h"
+#include "Settings.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -19,6 +21,21 @@ namespace
     constexpr double selfTestSampleRate = 48000.0;
     constexpr int selfTestBlockSize = 64;
     constexpr double selfTestSeconds = 3.0;
+
+    void printUsage()
+    {
+        const String name (productName);
+
+        say ("usage: " + name + " [--settings <file>]");
+        say ("       " + name + " --selftest <path to .vst3>");
+        say ("       " + name + " --selftest-settings");
+        say ("       " + name + " --list-devices");
+        say ("");
+        say ("  --settings <file>    use this settings file instead of the default one (no migration)");
+        say ("  --selftest           load a plugin through the chain and process audio without a device");
+        say ("  --selftest-settings  check the carry-over of settings from the pre-rename folder");
+        say ("  --list-devices       print input and output device names");
+    }
 
     int listDevices()
     {
@@ -76,6 +93,63 @@ namespace
         }
 
         return peaks;
+    }
+
+    // Runs the migration against a temporary home directory; the real one is never touched.
+    int selfTestSettings()
+    {
+        bool ok = true;
+
+        auto check = [&ok] (bool condition, const String& what)
+        {
+            say (String (condition ? "ok:   " : "FAIL: ") + what);
+            ok = ok && condition;
+        };
+
+        const auto contents = String ("<MIC_FX_HOST><CHAIN/></MIC_FX_HOST>");
+        const File root = File::getSpecialLocation (File::tempDirectory).getNonexistentChildFile ("voxrack-settings-selftest", {}, false);
+
+        {
+            const auto home = root.getChildFile ("carry-over");
+            const auto legacy = legacySettingsFile (home);
+            const auto target = defaultSettingsFile (home);
+            legacy.create();
+            legacy.replaceWithText (contents);
+
+            check (migrateLegacySettings (home) == Migration::copied, "legacy settings are copied when the new file is missing");
+            check (target.loadFileAsString() == contents, "the copy has the same contents");
+            check (legacy.loadFileAsString() == contents, "the legacy file is left in place");
+            check (target.getParentDirectory().getNumberOfChildFiles (File::findFiles) == 1, "no temporary file is left behind");
+            check (migrateLegacySettings (home) == Migration::notNeeded, "a second run does nothing");
+        }
+
+        {
+            const auto home = root.getChildFile ("keep-existing");
+            const auto legacy = legacySettingsFile (home);
+            const auto target = defaultSettingsFile (home);
+            legacy.create();
+            legacy.replaceWithText ("legacy");
+            target.create();
+            target.replaceWithText ("current");
+
+            check (migrateLegacySettings (home) == Migration::notNeeded, "nothing happens when the new file already exists");
+            check (target.loadFileAsString() == "current", "the existing new file is not overwritten");
+        }
+
+        {
+            const auto home = root.getChildFile ("fresh");
+            home.createDirectory();
+
+            check (migrateLegacySettings (home) == Migration::notNeeded, "nothing happens without a legacy file");
+            check (! defaultSettingsFile (home).getParentDirectory().exists(), "no settings folder is created without a legacy file");
+        }
+
+        check (defaultSettingsFile (root).getFullPathName().contains (String ("/") + productName + "/settings.xml"),
+               "the new location is named after the product");
+
+        root.deleteRecursively();
+        say (ok ? "SELFTEST SETTINGS OK" : "SELFTEST SETTINGS FAILED");
+        return ok ? 0 : 1;
     }
 
     int selfTest (const String& path)
@@ -158,21 +232,45 @@ namespace
 
 bool isCommandLineMode (const StringArray& args)
 {
-    return args.contains ("--selftest") || args.contains ("--list-devices");
+    return args.contains ("--selftest") || args.contains ("--selftest-settings")
+        || args.contains ("--list-devices") || args.contains ("--help");
+}
+
+bool applySettingsOption (const StringArray& args)
+{
+    const auto index = args.indexOf ("--settings");
+
+    if (index < 0)
+        return true;
+
+    if (index + 1 >= args.size())
+        return false;
+
+    useSettingsFile (File::getCurrentWorkingDirectory().getChildFile (args[index + 1]));
+    return true;
 }
 
 int runCommandLine (const StringArray& args)
 {
     const ScopedJuceInitialiser_GUI initialiser;
 
+    if (args.contains ("--help"))
+    {
+        printUsage();
+        return 0;
+    }
+
     if (args.contains ("--list-devices"))
         return listDevices();
+
+    if (args.contains ("--selftest-settings"))
+        return selfTestSettings();
 
     const auto index = args.indexOf ("--selftest");
 
     if (index + 1 >= args.size())
     {
-        say ("usage: mic-fx-host --selftest <path to .vst3>");
+        printUsage();
         return 64;
     }
 

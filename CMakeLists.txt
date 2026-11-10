@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.22)
 
 project(MicFxHost VERSION 0.1.0 LANGUAGES C CXX)
 
+# The product name lives only here. It becomes the .app name, the window title, the settings folder
+# and, through MFX_PRODUCT_NAME below, the constant in src/Product.h.
+set(MFX_PRODUCT_NAME "VOXRACK")
+string(TOLOWER "${MFX_PRODUCT_NAME}" MFX_PRODUCT_ID)
+
 # Some Command Line Tools installs ship a clang whose built-in libc++ header directory only holds a
 # few sub-directories, so even `#include <algorithm>` fails. The complete set lives in the SDK.
 include(CheckCXXSourceCompiles)
@@ -33,10 +38,10 @@ endif()
 add_subdirectory(JUCE)
 
 juce_add_gui_app(MicFxHost
-    PRODUCT_NAME "mic-fx-host"
-    BUNDLE_ID local.mic-fx-host
+    PRODUCT_NAME "${MFX_PRODUCT_NAME}"
+    BUNDLE_ID local.nil.${MFX_PRODUCT_ID}
     MICROPHONE_PERMISSION_ENABLED TRUE
-    MICROPHONE_PERMISSION_TEXT "マイク入力にエフェクトを掛けるため、マイクへのアクセスが必要です。"
+    MICROPHONE_PERMISSION_TEXT "${MFX_PRODUCT_NAME} がマイク入力にエフェクトを掛けるため、マイクへのアクセスが必要です。"
     NEEDS_WEB_BROWSER FALSE
     NEEDS_CURL FALSE)
 
@@ -48,6 +53,7 @@ target_sources(MicFxHost PRIVATE
     src/MainComponent.cpp)
 
 target_compile_definitions(MicFxHost PRIVATE
+    MFX_PRODUCT_NAME="${MFX_PRODUCT_NAME}"
     JUCE_PLUGINHOST_VST3=1
     JUCE_PLUGINHOST_AU=0
     JUCE_PLUGINHOST_VST=0
@@ -75,6 +81,8 @@ set(MFX_TEST_PLUGINS
 foreach(plugin IN LISTS MFX_TEST_PLUGINS)
     if(EXISTS "${plugin}")
         get_filename_component(plugin_name "${plugin}" NAME_WE)
-        add_test(NAME "selftest ${plugin_name}" COMMAND MicFxHost --selftest "${plugin}")
+        add_test(NAME "${MFX_PRODUCT_NAME} selftest ${plugin_name}" COMMAND MicFxHost --selftest "${plugin}")
     endif()
 endforeach()
+
+add_test(NAME "${MFX_PRODUCT_NAME} settings migration" COMMAND MicFxHost --selftest-settings)

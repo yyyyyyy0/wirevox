@@ -1,5 +1,6 @@
 #include "CommandLine.h"
 #include "MainComponent.h"
+#include "Product.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
@@ -32,7 +33,7 @@ public:
 class MicFxHostApplication final : public JUCEApplication
 {
 public:
-    const String getApplicationName() override       { return JUCE_APPLICATION_NAME_STRING; }
+    const String getApplicationName() override       { return mfx::productName; }
     const String getApplicationVersion() override    { return JUCE_APPLICATION_VERSION_STRING; }
     bool moreThanOneInstanceAllowed() override       { return false; }
 
@@ -59,6 +60,12 @@ int main (int argc, char* argv[])
 
     if (mfx::isCommandLineMode (args))
         return mfx::runCommandLine (args);
+
+    if (! mfx::applySettingsOption (args))
+    {
+        mfx::runCommandLine ({ "--help" });
+        return 64;
+    }
 
     juce::JUCEApplicationBase::createInstance = &createApplication;
     return juce::JUCEApplicationBase::main (argc, (const char**) argv);

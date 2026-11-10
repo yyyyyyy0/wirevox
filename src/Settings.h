@@ -5,6 +5,21 @@
 namespace mfx
 {
 
+juce::File defaultSettingsFile (const juce::File& home);
+juce::File legacySettingsFile (const juce::File& home);
+
+enum class Migration { notNeeded, copied, failed };
+
+// Copies the pre-rename settings file to the new location when only the old one exists.
+// The old file is left in place. `home` is a parameter so tests can use a temporary directory.
+Migration migrateLegacySettings (const juce::File& home);
+
+// --settings <file>: use this file instead of the default location, and skip migration.
+void useSettingsFile (const juce::File&);
+
+// Runs the migration against the real home directory unless --settings was given.
+void migrateLegacySettingsIfNeeded();
+
 juce::File getSettingsFile();
 
 std::unique_ptr<juce::XmlElement> loadSettings();
