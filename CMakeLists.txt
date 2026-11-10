@@ -54,7 +54,8 @@ target_sources(MicFxHost PRIVATE
     src/Theme.cpp
     src/ThemeRegistry.cpp
     src/Rack84Theme.cpp
-    src/TerminalTheme.cpp)
+    src/TerminalTheme.cpp
+    src/Desktop95Theme.cpp)
 
 target_compile_definitions(MicFxHost PRIVATE
     MFX_PRODUCT_NAME="${MFX_PRODUCT_NAME}"
