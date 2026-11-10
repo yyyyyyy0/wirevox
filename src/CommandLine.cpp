@@ -19,7 +19,8 @@ namespace
         std::cout << text.toRawUTF8() << std::endl;
     }
 
-    constexpr double selfTestSampleRate = 48000.0;
+    // Overridden by --rate so plugin latency can be compared across sample rates.
+    double selfTestSampleRate = 48000.0;
     constexpr int selfTestBlockSize = 64;
     constexpr double selfTestSeconds = 3.0;
 
@@ -28,7 +29,7 @@ namespace
         const String name (productName);
 
         say ("usage: " + name + " [--settings <file>]");
-        say ("       " + name + " --selftest <path to .vst3>");
+        say ("       " + name + " --selftest <path to .vst3> [--rate <Hz>]");
         say ("       " + name + " --selftest-settings");
         say ("       " + name + " --list-devices");
         say ("");
@@ -292,6 +293,9 @@ int runCommandLine (const StringArray& args)
 
     if (args.contains ("--selftest-settings"))
         return selfTestSettings();
+
+    if (const auto rate = args.indexOf ("--rate"); rate >= 0 && rate + 1 < args.size() && args[rate + 1].getDoubleValue() > 0.0)
+        selfTestSampleRate = args[rate + 1].getDoubleValue();
 
     const auto index = args.indexOf ("--selftest");
 
