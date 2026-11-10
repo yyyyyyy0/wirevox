@@ -1,6 +1,10 @@
 #include "Settings.h"
 #include "Product.h"
 
+#include <climits>
+#include <cstdlib>
+#include <sys/stat.h>
+
 namespace mfx
 {
 using namespace juce;
@@ -18,6 +22,27 @@ namespace
     {
         return homeDirectory.getChildFile ("Library/Application Support").getChildFile (folder).getChildFile ("settings.xml");
     }
+}
+
+bool isSameFile (const File& a, const File& b)
+{
+    struct stat first {}, second {};
+
+    if (::stat (a.getFullPathName().toRawUTF8(), &first) == 0 && ::stat (b.getFullPathName().toRawUTF8(), &second) == 0)
+        return first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+
+    // At least one of them is not there yet; resolve the folders (which must exist) and compare the names.
+    const auto resolved = [] (const File& file) -> File
+    {
+        char buffer[PATH_MAX];
+
+        if (::realpath (file.getParentDirectory().getFullPathName().toRawUTF8(), buffer) == nullptr)
+            return file;
+
+        return File (String::fromUTF8 (buffer)).getChildFile (file.getFileName());
+    };
+
+    return resolved (a) == resolved (b);
 }
 
 File defaultSettingsFile (const File& homeDirectory)

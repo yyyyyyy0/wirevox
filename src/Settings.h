@@ -14,6 +14,10 @@ enum class Migration { notNeeded, copied, failed };
 // The old file is left in place. `home` is a parameter so tests can use a temporary directory.
 Migration migrateLegacySettings (const juce::File& home);
 
+// True when both paths lead to the same file, whatever `..` segments, symbolic links (also in the
+// folders) or hard links they go through. A path that does not exist yet is compared by its folder.
+bool isSameFile (const juce::File&, const juce::File&);
+
 // --settings <file>: use this file instead of the default location, and skip migration.
 void useSettingsFile (const juce::File&);
 

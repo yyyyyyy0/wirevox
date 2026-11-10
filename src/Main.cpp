@@ -42,7 +42,7 @@ public:
     bool moreThanOneInstanceAllowed() override
     {
         return getCommandLineParameterArray().contains ("--settings")
-            && mfx::getSettingsFile() != mfx::defaultSettingsFile (File::getSpecialLocation (File::userHomeDirectory));
+            && ! mfx::isSameFile (mfx::getSettingsFile(), mfx::defaultSettingsFile (File::getSpecialLocation (File::userHomeDirectory)));
     }
 
     void initialise (const String&) override
