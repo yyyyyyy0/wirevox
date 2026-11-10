@@ -109,9 +109,10 @@ namespace
     struct Session
     {
         Engine engine;
+        std::unique_ptr<ScopedSetup> restore;     // after `engine`: it is gone before the engine is
         File settingsFile;
-        double inputRateBefore = 0.0;
-        String inputName;
+        Engine::DeviceRates ratesBefore;
+        String inputName, outputName;
         bool chainLoaded = false;
     };
 
@@ -130,10 +131,13 @@ namespace
             return "the settings file has no DEVICESETUP; choose devices in the app first";
 
         s.inputName = deviceXml->getStringAttribute ("audioInputDeviceName");
+        s.outputName = deviceXml->getStringAttribute ("audioOutputDeviceName");
 
-        // Read from the HAL before anything opens the device: the hardware must not be left at another rate.
-        s.inputRateBefore = Engine::nominalRateOf (s.inputName, true);
-        report.line ("input device " + s.inputName + " nominal rate before: " + String (s.inputRateBefore, 0) + " Hz");
+        // Read from the HAL before anything opens the devices: JUCE writes its rate into every device it
+        // opens, which can retune a virtual output device, and the run has to say so.
+        s.ratesBefore = { Engine::nominalRateOf (s.inputName, true), Engine::nominalRateOf (s.outputName, false) };
+        report.line ("input device " + s.inputName + " nominal rate before: " + String (s.ratesBefore.input, 0) + " Hz");
+        report.line ("output device " + s.outputName + " nominal rate before: " + String (s.ratesBefore.output, 0) + " Hz");
 
         if (loadChain)
             if (auto* chainXml = settings->getChildByName ("CHAIN"))
@@ -151,6 +155,9 @@ namespace
 
         s.engine.start();
 
+        // Whatever the options below change on the device is put back when the session ends.
+        s.restore = std::make_unique<ScopedSetup> (s.engine);
+
         if (const auto size = getOption (args, "--buffer"); size.isNotEmpty())
             if (s.engine.setBufferSize (size.getIntValue()) == 0)
                 return "could not open the device at buffer size " + size;
@@ -158,7 +165,12 @@ namespace
         Experiments experiments;
 
         if (const auto usage = getOption (args, "--io-cycle-usage"); usage.isNotEmpty())
-            experiments.ioCycleUsage = usage.getFloatValue();
+        {
+            experiments.ioCycleUsage = validCycleUsage (usage.getDoubleValue());
+
+            if (! experiments.ioCycleUsage.has_value())
+                return "--io-cycle-usage needs a number above 0 and at most 1, not '" + usage + "'";
+        }
 
         s.engine.setExperiments (experiments);
         measure::wait (500);
@@ -166,15 +178,25 @@ namespace
         return {};
     }
 
-    // Reads the hardware rate again and puts it back if the run moved it. True when it is unchanged.
-    bool verifyInputRate (Session& s, Report& report)
+    // Reads both nominal rates again. True when neither moved while the devices were open.
+    bool verifyRates (Session& s, Report& report)
     {
-        const auto after = Engine::nominalRateOf (s.inputName, true);
-        const auto unchanged = std::abs (after - s.inputRateBefore) < 0.5;
-        report.line ("input device " + s.inputName + " nominal rate after: " + String (after, 0) + " Hz" + (unchanged ? " (unchanged)" : " (CHANGED)"));
+        bool unchanged = true;
+
+        const auto check = [&] (const String& label, const String& name, bool input, double before)
+        {
+            const auto after = Engine::nominalRateOf (name, input);
+            const auto same = std::abs (after - before) < 0.5;
+            unchanged = unchanged && same;
+            report.line (label + " " + name + " nominal rate after: " + String (after, 0) + " Hz"
+                         + (same ? " (unchanged)" : " (CHANGED, was " + String (before, 0) + " Hz)"));
+        };
+
+        check ("input device", s.inputName, true, s.ratesBefore.input);
+        check ("output device", s.outputName, false, s.ratesBefore.output);
 
         if (! unchanged)
-            report.line ("the run changed the hardware rate; stopping");
+            report.line ("opening the devices changed a nominal rate: JUCE writes the rate of the settings file into the devices it opens");
 
         return unchanged;
     }
@@ -192,6 +214,11 @@ namespace
         report.line ("app rate " + String (device->getCurrentSampleRate(), 0) + " Hz, buffer " + String (device->getCurrentBufferSizeSamples())
                      + " samples (callback receives " + String (s.engine.callback.getBlockSize()) + ")");
         describeNumbers (report, "aggregate (JUCE private)", s.engine.getAggregateNumbers());
+
+        const auto rates = s.engine.getDeviceRates();
+        const auto mismatch = describeRateMismatch (device->getCurrentSampleRate(), rates.input, rates.output);
+        report.line ("device rates after opening: input " + String (rates.input, 0) + " Hz, output " + String (rates.output, 0) + " Hz"
+                     + (mismatch.isEmpty() ? String() : " (differ from the app's rate: the system converts)"));
 
         float usage = 0.0f;
         report.line (hal::readIoCycleUsage (s.engine.getAggregate(), usage) ? "aggregate IOCycleUsage " + fixed (usage, 2)
@@ -238,14 +265,14 @@ namespace
         if (result.problem.isNotEmpty())
         {
             report.line ("FAIL: " + result.problem);
-            verifyInputRate (s, report);
+            verifyRates (s, report);
             return 2;
         }
 
         report.line ("capture IO buffer during the recording: " + String (result.captureBufferUsed) + " frames");
         describeNumbers (report, "capture device '" + result.captureName + "'", result.capture);
         describeRun (report, result, withChain);
-        const auto rateOk = verifyInputRate (s, report);
+        const auto rateOk = verifyRates (s, report);
         save (report, s, "measure");
         return rateOk && result.trustworthyRuns > 0 ? 0 : 1;
     }
@@ -285,9 +312,13 @@ namespace
             }
 
             report.line (tuner.getResult());
+
+            const auto audio = s.engine.getPersistedAudio();
+            report.line ("the settings file would now hold: buffer " + String (audio.device != nullptr ? audio.device->getIntAttribute ("audioDeviceBufferSize") : 0)
+                         + ", cycleUsage " + (audio.cycleUsage.has_value() ? fixed (*audio.cycleUsage, 2) : String ("default")) + " (not written)");
         }
 
-        const auto rateOk = verifyInputRate (s, report);
+        const auto rateOk = verifyRates (s, report);
         save (report, s, "measure-tune");
         return rateOk ? 0 : 1;
     }
@@ -497,7 +528,7 @@ namespace
             report.line ("no configuration was measurable, free of overloads and late callbacks, and stayed clean for the soak");
         }
 
-        const auto rateOk = verifyInputRate (s, report);
+        const auto rateOk = verifyRates (s, report);
         save (report, s, "measure-sweep");
         return rateOk ? 0 : 1;
     }
@@ -519,9 +550,11 @@ int runMeasureCommand (const StringArray& args)
         return 64;
     }
 
-    if (! explicitSettings && anotherInstanceRunning())
+    // A settings file that names the same devices opens them again, so --settings does not make this safe.
+    if (anotherInstanceRunning() && ! args.contains ("--force"))
     {
-        std::cout << "another " << productName << " is running; quit it first or use --settings <file>" << std::endl;
+        std::cout << "another " << productName << " process is running and may hold the devices these settings name; a measurement "
+                     "would open them again and interrupt its audio. Quit it, or pass --force if it is not using them" << std::endl;
         return 3;
     }
 
