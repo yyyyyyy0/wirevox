@@ -38,7 +38,11 @@ public:
     const String getApplicationVersion() override    { return JUCE_APPLICATION_VERSION_STRING; }
     // An instance on its own --settings file is a separate rack (used for visual checks while the
     // real one is live); two on the default settings would open the same devices twice.
-    bool moreThanOneInstanceAllowed() override       { return getCommandLineParameterArray().contains ("--settings"); }
+    bool moreThanOneInstanceAllowed() override
+    {
+        return getCommandLineParameterArray().contains ("--settings")
+            && mfx::getSettingsFile() != mfx::defaultSettingsFile (File::getSpecialLocation (File::userHomeDirectory));
+    }
 
     void initialise (const String&) override
     {
