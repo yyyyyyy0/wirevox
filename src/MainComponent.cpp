@@ -211,11 +211,8 @@ private:
 //==============================================================================
 MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     : themes (themeRegistry),
-      chain (formatManager),
       deviceSelector (deviceManager, 0, 256, 0, 256, false, false, false, false)
 {
-    addDefaultFormatsToManager (formatManager);
-
     const auto migration = migrateLegacySettingsIfNeeded();
     const auto settings = loadSettings();
     StringArray restoreProblems;
@@ -226,9 +223,11 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
     // Without saved settings, initialise() would open the system default devices. An empty setup
     // keeps every device closed until the user picks one: a mic wired straight to the speakers
     // on first launch would feed back.
-    const XmlElement noDevice ("DEVICESETUP");
     auto* savedDevice = settings != nullptr ? settings->getChildByName ("DEVICESETUP") : nullptr;
-    deviceManager.initialise (1, 2, savedDevice != nullptr ? savedDevice : &noDevice, false);
+    engine.openDevices (savedDevice);
+
+    if (settings != nullptr && settings->hasAttribute ("cycleUsage"))
+        engine.setExperiments ({ (float) settings->getDoubleAttribute ("cycleUsage") });
 
     bool skippedChainAfterCrash = false;
 
@@ -255,9 +254,7 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
         }
     }
 
-    player.setProcessor (&chain.getGraph());
-    deviceManager.addAudioCallback (&player);
-    chain.rewire();
+    engine.start();
     deviceManager.addChangeListener (this);
 
     deviceViewport.setViewedComponent (&deviceSelector, false);
@@ -270,6 +267,10 @@ MainComponent::MainComponent (ui::ThemeRegistry& themeRegistry)
 
     addButton.onClick = [this] { chooseFiles(); };
     addAndMakeVisible (addButton);
+
+    minLatencyButton.onClick = [this] { startTuning(); };
+    minLatencyButton.setTooltip (ja ("バッファサイズとIOサイクル使用率を下げながら、音切れ（オーバーロード）が出ない最小の遅延を探します。数十秒かかり、その間は音が途切れます"));
+    addAndMakeVisible (minLatencyButton);
     addAndMakeVisible (dropHint);
 
     addAndMakeVisible (lcd);
@@ -317,9 +318,6 @@ MainComponent::~MainComponent()
     persist();
     closeAllEditors();
     deviceManager.removeChangeListener (this);
-    deviceManager.removeAudioCallback (&player);
-    player.setProcessor (nullptr);
-    deviceManager.closeAudioDevice();
 }
 
 void MainComponent::paint (Graphics& g)
@@ -371,6 +369,8 @@ void MainComponent::resized()
 
     auto top = area.removeFromTop (28);
     addButton.setBounds (top.removeFromLeft (170));
+    top.removeFromLeft (8);
+    minLatencyButton.setBounds (top.removeFromLeft (132));
     dropHint.setBounds (top.withTrimmedLeft (10));
     area.removeFromTop (8);
 
@@ -557,7 +557,33 @@ void MainComponent::chainEdited()
 //==============================================================================
 void MainComponent::showStatus (const String& text)
 {
-    status.setText (text);
+    statusMessage = text;
+    refreshStatus();
+}
+
+void MainComponent::refreshStatus()
+{
+    const auto progress = tuner.getProgress();
+    status.setText (progress.isNotEmpty() ? progress : statusMessage.isNotEmpty() ? statusMessage : standingWarning);
+}
+
+void MainComponent::startTuning()
+{
+    if (tuner.isRunning())
+    {
+        tuner.cancel();
+    }
+    else
+    {
+        showStatus ({});
+        tuner.start();
+
+        if (! tuner.isRunning())
+            showStatus (tuner.getResult());
+    }
+
+    minLatencyButton.setButtonText (tuner.isRunning() ? ja ("中止") : "MIN LATENCY");
+    refreshStatus();
 }
 
 void MainComponent::persist()
@@ -567,6 +593,9 @@ void MainComponent::persist()
 
     if (auto device = deviceManager.createStateXml())
         root.addChildElement (device.release());
+
+    if (const auto usage = engine.getExperiments().ioCycleUsage)
+        root.setAttribute ("cycleUsage", (double) *usage);
 
     root.addChildElement (chain.toXml().release());
 
@@ -578,11 +607,14 @@ void MainComponent::persist()
 
 void MainComponent::updateReadout()
 {
+    engine.refreshHal();
+
     String text, bigValue = "--.--";
     auto* device = deviceManager.getCurrentAudioDevice();
 
     if (device == nullptr)
     {
+        standingWarning.clear();
         text << ja ("オーディオデバイスが開いていません。\n左のパネルで入力・出力デバイスを選んでください。\n");
     }
     else
@@ -591,7 +623,8 @@ void MainComponent::updateReadout()
         const auto inLatency = device->getInputLatencyInSamples();
         const auto outLatency = device->getOutputLatencyInSamples();
         const auto pluginLatency = chain.getGraph().getLatencySamples();
-        const auto xruns = device->getXRunCount();
+        const auto load = engine.callback.getLoad();
+        const auto hardwareRate = engine.getInputHardwareRate();
         const auto setup = deviceManager.getAudioDeviceSetup();
         const auto totalSamples = inLatency + outLatency + pluginLatency;
 
@@ -608,7 +641,19 @@ void MainComponent::updateReadout()
              << ja ("出力デバイス遅延（バッファ込み）: ") << samplesAndMs (outLatency, sampleRate) << "\n"
              << ja ("プラグイン遅延合計: ") << samplesAndMs (pluginLatency, sampleRate) << "\n"
              << ja ("合計: ") << samplesAndMs (totalSamples, sampleRate) << "\n"
-             << "xrun: " << (xruns >= 0 ? String (xruns) : ja ("非対応")) << "\n";
+             << ja ("負荷（コールバックの所要時間 / バッファ時間）: 平均 ") << String (load.meanPercent, 1) << " % / "
+             << ja ("最大 ") << String (load.maxPercent, 1) << " %\n"
+             << ja ("オーバーロード: ") << engine.getOverloads() << ja ("  遅れたコールバック: ") << (int) load.late;
+
+        if (const auto usage = engine.getExperiments().ioCycleUsage)
+            text << ja ("  IOサイクル使用率: ") << String (*usage, 2);
+
+        text << "\n";
+
+        standingWarning = hardwareRate > 0.0 && std::abs (hardwareRate - sampleRate) > 0.5
+                        ? ja ("入力機器の本来のレートは ") + String (hardwareRate, 0) + ja (" Hz で、アプリは ") + String (sampleRate, 0)
+                            + ja (" Hz で動いています。レート変換が入り、遅延と負荷が増えます")
+                        : String();
 
         if (device->getActiveInputChannels().isZero())
             text << ja ("入力チャンネルが選ばれていません。\n");
@@ -620,6 +665,7 @@ void MainComponent::updateReadout()
                  << chain[i].node->getProcessor()->getLatencySamples() << " samples\n";
 
     lcd.setContent ({ "TOTAL LATENCY", bigValue, "ms", text.trimEnd() });
+    refreshStatus();
 
     const auto preferred = lcd.getPreferredHeight (lcd.getWidth());
 
@@ -632,6 +678,13 @@ void MainComponent::updateReadout()
 
 void MainComponent::timerCallback()
 {
+    if (tuner.isRunning() && tuner.tick())
+    {
+        minLatencyButton.setButtonText ("MIN LATENCY");
+        showStatus (tuner.getResult());
+        persist();
+    }
+
     updateReadout();
 
     if (++ticksSinceSave >= ticksPerSave)

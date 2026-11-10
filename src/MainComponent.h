@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Chain.h"
+#include "Engine.h"
+#include "LatencyTuner.h"
+#include "Text.h"
 #include "Theme.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -9,9 +12,6 @@
 namespace mfx
 {
 using namespace juce;
-
-// JUCE reads plain char* literals as ASCII, so UTF-8 text has to be converted explicitly.
-inline String ja (const char* utf8) { return String::fromUTF8 (utf8); }
 
 class MainComponent final : public Component,
                             public FileDragAndDropTarget,
@@ -49,7 +49,9 @@ private:
 
     void setTheme (const String& id);
     void showStatus (const String&);
+    void refreshStatus();
     void updateReadout();
+    void startTuning();
     void persist();
 
     void timerCallback() override;
@@ -58,14 +60,16 @@ private:
     ui::ThemeRegistry& themes;
     String themeId;
 
-    AudioPluginFormatManager formatManager;
-    Chain chain;
-    AudioDeviceManager deviceManager;
-    AudioProcessorPlayer player;
+    Engine engine;
+    Chain& chain = engine.chain;
+    AudioDeviceManager& deviceManager = engine.deviceManager;
+    AudioPluginFormatManager& formatManager = engine.formats;
+    LatencyTuner tuner { engine };
 
     AudioDeviceSelectorComponent deviceSelector;
     Viewport deviceViewport;
     TextButton addButton { ja ("プラグインを追加...") };
+    TextButton minLatencyButton { "MIN LATENCY" };
     Label dropHint { {}, ja (".vst3 をこのウィンドウにドロップしても追加できます") };
     std::unique_ptr<ChainListModel> listModel;
     ListBox chainList;
@@ -84,6 +88,7 @@ private:
     std::unique_ptr<FileChooser> chooser;
     std::map<AudioProcessor*, std::unique_ptr<EditorWindow>> editors;
     int ticksSinceSave = 0;
+    String statusMessage, standingWarning;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };
