@@ -57,6 +57,7 @@ target_sources(MicFxHost PRIVATE
     src/Engine.cpp
     src/LatencyTuner.cpp
     src/Measure.cpp
+    src/SelfTests.cpp
     src/MeasureCommand.cpp
     src/MainComponent.cpp
     src/Theme.cpp
@@ -103,4 +104,6 @@ endforeach()
 add_test(NAME "${MFX_PRODUCT_NAME} settings migration and theme" COMMAND MicFxHost --selftest-settings)
 add_test(NAME "${MFX_PRODUCT_NAME} delay estimator" COMMAND MicFxHost --selftest-correlate)
 add_test(NAME "${MFX_PRODUCT_NAME} hard bypass" COMMAND MicFxHost --selftest-chain)
-add_test(NAME "${MFX_PRODUCT_NAME} sweep choice and restore" COMMAND MicFxHost --selftest-sweep)
+add_test(NAME "${MFX_PRODUCT_NAME} sweep choice" COMMAND MicFxHost --selftest-sweep)
+add_test(NAME "${MFX_PRODUCT_NAME} latency timing and burst injection" COMMAND MicFxHost --selftest-timing)
+add_test(NAME "${MFX_PRODUCT_NAME} engine persistence, MIN LATENCY and restore" COMMAND MicFxHost --selftest-engine)

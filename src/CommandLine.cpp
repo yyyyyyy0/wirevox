@@ -5,12 +5,16 @@
 #include "Measure.h"
 #include "MeasureCommand.h"
 #include "Product.h"
+#include "SelfTests.h"
 #include "Settings.h"
 #include "Theme.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <atomic>
 #include <iostream>
+#include <thread>
+#include <unistd.h>
 
 namespace mfx
 {
@@ -35,8 +39,8 @@ namespace
         say ("usage: " + name + " [--settings <file>]");
         say ("       " + name + " --selftest <path to .vst3> [--rate <Hz>]");
         say ("       " + name + " --selftest-settings");
-        say ("       " + name + " --selftest-correlate | --selftest-chain | --selftest-sweep");
-        say ("       " + name + " --measure | --measure-sweep --settings <file> [--runs N] [--buffer N] [--io-cycle-usage X] [--with-chain]");
+        say ("       " + name + " --selftest-correlate | --selftest-chain | --selftest-sweep | --selftest-timing | --selftest-engine");
+        say ("       " + name + " --measure | --measure-sweep | --tune --settings <file> [--runs N] [--buffer N] [--io-cycle-usage X] [--with-chain] [--force]");
         say ("       " + name + " --list-devices");
         say ("");
         say ("  --settings <file>    use this settings file instead of the default one (no migration)");
@@ -45,10 +49,13 @@ namespace
         say ("  --list-devices       print input and output device names");
         say ("  --selftest-correlate the delay estimator against signals with a known fractional delay");
         say ("  --selftest-chain     hard bypass: latency, CPU and state of a bypassed slot, with test processors");
-        say ("  --selftest-sweep     the sweep's choice of the fastest clean setting and its restore of the device setup");
+        say ("  --selftest-sweep     the sweep's choice of the fastest clean setting");
+        say ("  --selftest-timing    the latency arithmetic on made-up HAL timestamps, and the burst injection");
+        say ("  --selftest-engine    persisted audio settings, MIN LATENCY and device restore on a fake device layer");
         say ("  --measure            inject a test burst, record it on the output device and print the latency");
         say ("  --measure-sweep      repeat that for buffer sizes and switches and print a table sorted by latency");
         say ("  --tune               run the MIN LATENCY search without a window, then restore the setup");
+        say ("  --force              run a measurement although another " + name + " process is running (the devices are opened a second time)");
     }
 
     int listDevices()
@@ -182,6 +189,28 @@ namespace
                    "settings without a theme use the default");
 
             useSettingsFile ({});
+        }
+
+        {
+            const auto real = root.getChildFile ("same/real folder/settings.xml");
+            real.create();
+            const auto linkFolder = root.getChildFile ("same/link");
+            const auto linkFile = root.getChildFile ("same/file-link.xml");
+            ::symlink (real.getParentDirectory().getFullPathName().toRawUTF8(), linkFolder.getFullPathName().toRawUTF8());
+            ::symlink (real.getFullPathName().toRawUTF8(), linkFile.getFullPathName().toRawUTF8());
+            const auto hardLink = root.getChildFile ("same/hard.xml");
+            ::link (real.getFullPathName().toRawUTF8(), hardLink.getFullPathName().toRawUTF8());
+
+            check (isSameFile (real, real), "a file is the same as itself");
+            check (isSameFile (real, real.getParentDirectory().getChildFile ("../real folder/./settings.xml")), "relative segments are resolved");
+            check (isSameFile (real, linkFile), "a symbolic link to the file is the same file");
+            check (isSameFile (real, linkFolder.getChildFile ("settings.xml")), "a path through a linked folder is the same file");
+            check (isSameFile (real, hardLink), "a hard link is the same file");
+            check (! isSameFile (real, root.getChildFile ("same/other.xml")), "another file is not");
+
+            const auto missing = real.getParentDirectory().getChildFile ("new.xml");
+            check (isSameFile (missing, linkFolder.getChildFile ("new.xml")), "a file that does not exist yet is compared by its resolved folder");
+            check (! isSameFile (missing, real), "and differs from an existing one");
         }
 
         check (defaultSettingsFile (root).getFullPathName().contains (String ("/") + productName + "/settings.xml"),
@@ -388,6 +417,50 @@ namespace
         chain.setForceBypassAll (false);
         check (graph.getLatencySamples() == latency, "forced bypass released: latency " + String (graph.getLatencySamples()));
 
+        // Toggling the bypass while another thread keeps processing: a node that is suspended before the graph
+        // stops connecting it outputs silence for the blocks in between (thousands in this run). Suspending it
+        // after the rebuild leaves only a block that was already running when the new sequence took over.
+        {
+            // A processor without latency, so that a silent block can only come from the graph: the
+            // one above is reset on every un-bypass and is silent for its 184 samples by design.
+            Chain stress (formats);
+            prepareGraph (stress);
+            stress.addProcessor (std::make_unique<LatentProcessor> (0), description);
+            auto& stressGraph = stress.getGraph();
+
+            std::atomic<bool> stop { false };
+            std::atomic<int> silentBlocks { 0 }, blocks { 0 };
+
+            std::thread audio ([&]
+            {
+                juce::AudioBuffer<float> buffer (2, selfTestBlockSize);
+                MidiBuffer midi;
+
+                while (! stop.load())
+                {
+                    buffer.clear();
+
+                    for (int i = 0; i < selfTestBlockSize; ++i)
+                        buffer.setSample (0, i, 1.0f);
+
+                    stressGraph.processBlock (buffer, midi);
+
+                    if (++blocks > 50 && buffer.getMagnitude (0, 0, selfTestBlockSize) == 0.0f)
+                        ++silentBlocks;
+                }
+            });
+
+            for (int i = 0; i < 400; ++i)
+            {
+                stress.setBypassed (0, i % 2 == 0);
+                Thread::sleep (1);
+            }
+
+            stop = true;
+            audio.join();
+            check (silentBlocks <= 40, "toggling the bypass 400 times under load: " + String (silentBlocks.load()) + " of " + String (blocks.load()) + " blocks were silent");
+        }
+
         say (ok ? "SELFTEST CHAIN OK" : "SELFTEST CHAIN FAILED");
         return ok ? 0 : 1;
     }
@@ -411,22 +484,6 @@ namespace
         check (measure::pickBest ({ { true, 3.0, 1, 0 }, { false, 0.0, 0, 0 } }) == -1, "no clean row means no winner");
         check (measure::isFaster ({ true, 9.0, 0, 0 }, { false, 0.0, 0, 0 }) && ! measure::isFaster ({ false, 0.0, 0, 0 }, { true, 9.0, 0, 0 }),
                "rows that could not be measured sort last");
-
-        {
-            Engine engine;
-            engine.openDevices (nullptr);
-            engine.start();
-
-            {
-                const ScopedSetup guard (engine);
-                engine.setExperiments ({ 0.25f });
-                engine.chain.setForceBypassAll (true);
-                engine.callback.setInjecting (true);
-            }
-
-            check (! engine.getExperiments().ioCycleUsage.has_value(), "the experiment switch is back to its default after the scope");
-            check (engine.deviceManager.getCurrentAudioDevice() == nullptr, "no device was opened by the restore");
-        }
 
         say (ok ? "SELFTEST SWEEP OK" : "SELFTEST SWEEP FAILED");
         return ok ? 0 : 1;
@@ -515,7 +572,8 @@ namespace
 bool isCommandLineMode (const StringArray& args)
 {
     return args.contains ("--selftest") || args.contains ("--selftest-correlate") || args.contains ("--selftest-chain")
-        || args.contains ("--selftest-sweep") || args.contains ("--selftest-settings")
+        || args.contains ("--selftest-sweep") || args.contains ("--selftest-settings") || args.contains ("--selftest-timing")
+        || args.contains ("--selftest-engine") || args.contains ("--selftest-engine-child")
         || args.contains ("--list-devices") || args.contains ("--help") || isMeasureMode (args);
 }
 
@@ -568,6 +626,15 @@ int runCommandLine (const StringArray& args)
 
     if (args.contains ("--selftest-sweep"))
         return selfTestSweep();
+
+    if (args.contains ("--selftest-timing"))
+        return selfTestTiming();
+
+    if (args.contains ("--selftest-engine"))
+        return selfTestEngine();
+
+    if (const auto child = args.indexOf ("--selftest-engine-child"); child >= 0 && child + 1 < args.size())
+        return selfTestEngineChild (args[child + 1]);
 
     if (const auto rate = args.indexOf ("--rate"); rate >= 0 && rate + 1 < args.size() && args[rate + 1].getDoubleValue() > 0.0)
         selfTestSampleRate = args[rate + 1].getDoubleValue();
